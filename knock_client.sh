@@ -1,0 +1,119 @@
+#!/bin/bash
+# ──────────────────────────────────────────────────────────────────────
+# knock_client.sh — Send a port knock sequence to a target server.
+#
+# This script sends TCP SYN packets to the configured knock ports
+# in order, then optionally attempts an SSH connection.
+#
+# Usage:
+#   ./knock_client.sh <target_ip>
+#   ./knock_client.sh <target_ip> --ssh          # Also try SSH after
+#   ./knock_client.sh <target_ip> --ssh user      # SSH as specific user
+#
+# Requirements:
+#   - nmap (preferred) or ncat/nc must be installed
+# ──────────────────────────────────────────────────────────────────────
+
+set -e
+
+# ── Configuration (must match the server's config.h) ─────────────────
+KNOCK_PORTS=(7000 8000 9000)
+DELAY=0.5  # seconds between knocks
+
+# ── Colors for output ────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# ── Argument parsing ─────────────────────────────────────────────────
+if [ -z "$1" ]; then
+    echo -e "${RED}Usage: $0 <target_ip> [--ssh [user]]${NC}"
+    exit 1
+fi
+
+TARGET="$1"
+DO_SSH=0
+SSH_USER="$USER"
+
+if [ "$2" = "--ssh" ]; then
+    DO_SSH=1
+    if [ -n "$3" ]; then
+        SSH_USER="$3"
+    fi
+fi
+
+# ── Detect available knock tool ──────────────────────────────────────
+KNOCK_TOOL=""
+if command -v nmap &>/dev/null; then
+    KNOCK_TOOL="nmap"
+elif command -v ncat &>/dev/null; then
+    KNOCK_TOOL="ncat"
+elif command -v nc &>/dev/null; then
+    KNOCK_TOOL="nc"
+else
+    echo -e "${RED}Error: No suitable tool found. Install nmap:${NC}"
+    echo "  sudo dnf install nmap"
+    exit 1
+fi
+
+echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+echo -e "${CYAN}║       PORT KNOCK CLIENT                  ║${NC}"
+echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
+echo -e "${CYAN}║  Target:  ${GREEN}${TARGET}${NC}"
+echo -e "${CYAN}║  Tool:    ${GREEN}${KNOCK_TOOL}${NC}"
+echo -e "${CYAN}║  Ports:   ${GREEN}${KNOCK_PORTS[*]}${NC}"
+echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
+echo ""
+
+# ── Send knock sequence ──────────────────────────────────────────────
+send_knock() {
+    local port=$1
+
+    case "$KNOCK_TOOL" in
+        nmap)
+            # Send a single SYN probe — no ping, no retries
+            nmap -Pn --host-timeout 1s --max-retries 0 -p "$port" "$TARGET" &>/dev/null
+            ;;
+        ncat)
+            # Attempt TCP connect with short timeout (will fail, but sends SYN)
+            ncat -w 1 "$TARGET" "$port" </dev/null &>/dev/null 2>&1 || true
+            ;;
+        nc)
+            # Attempt TCP connect with short timeout
+            nc -z -w 1 "$TARGET" "$port" &>/dev/null 2>&1 || true
+            ;;
+    esac
+}
+
+for i in "${!KNOCK_PORTS[@]}"; do
+    port="${KNOCK_PORTS[$i]}"
+    step=$((i + 1))
+    total=${#KNOCK_PORTS[@]}
+
+    echo -ne "  ${YELLOW}Knock ${step}/${total}:${NC} Sending SYN to port ${GREEN}${port}${NC}..."
+    send_knock "$port"
+    echo -e " ${GREEN}✓${NC}"
+
+    # Delay between knocks (but not after the last one)
+    if [ "$step" -lt "$total" ]; then
+        sleep "$DELAY"
+    fi
+done
+
+echo ""
+echo -e "  ${GREEN}✓ Knock sequence complete!${NC}"
+echo ""
+
+# ── Optional SSH connection ──────────────────────────────────────────
+if [ "$DO_SSH" -eq 1 ]; then
+    echo -e "  ${CYAN}Attempting SSH connection...${NC}"
+    echo -e "  ${YELLOW}ssh ${SSH_USER}@${TARGET}${NC}"
+    echo ""
+    sleep 1  # Give the daemon a moment to process
+    ssh "${SSH_USER}@${TARGET}"
+else
+    echo -e "  ${CYAN}Now try:${NC} ssh ${SSH_USER}@${TARGET}"
+    echo -e "  ${YELLOW}(You have 30 seconds before the port closes)${NC}"
+fi
