@@ -4,10 +4,7 @@
  * Supports dual-mode output: stderr (foreground) or syslog (daemon).
  * Messages are filtered by the compile-time LOG_LEVEL from config.h.
  *
- * _GNU_SOURCE is required to expose vsyslog() from syslog.h.
  */
-
-#define _GNU_SOURCE
 
 #include "logger.h"
 #include "config.h"
