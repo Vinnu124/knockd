@@ -1,4 +1,4 @@
-# knockd — Port Knocking Daemon
+# knockd 
 
 A lightweight security daemon written in C that hides services behind a secret sequence of connection attempts. In its default state, SSH (port 22) is completely firewalled. Only a client that "knocks" on the right ports in the right order gets temporary access — automatically revoked after 30 seconds.
 
