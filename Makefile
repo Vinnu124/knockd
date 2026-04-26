@@ -7,11 +7,11 @@
 # ──────────────────────────────────────────────────────────────────────
 
 CC      = gcc
-CFLAGS  = -Wall -Wextra -Werror -O2 -pthread -std=c11 -I include -D_GNU_SOURCE
-LDFLAGS = -pthread
+CFLAGS  = -Wall -Wextra -Werror -O2 -pthread -fopenmp -std=c11 -I include -D_GNU_SOURCE
+LDFLAGS = -pthread -fopenmp
 
 # Source files
-SRC     = src/main.c src/sniffer.c src/knocker.c src/firewall.c src/logger.c
+SRC     = src/main.c src/sniffer.c src/knocker.c src/firewall.c src/logger.c src/packet_queue.c
 
 # Output binary
 TARGET  = knockd
@@ -30,7 +30,7 @@ $(TARGET): $(SRC)
 	@echo ""
 
 # Debug build: no optimization, debug symbols, extra warnings
-debug: CFLAGS = -Wall -Wextra -g -O0 -pthread -std=c11 -DDEBUG
+debug: CFLAGS = -Wall -Wextra -g -O0 -pthread -fopenmp -std=c11 -I include -D_GNU_SOURCE -DDEBUG
 debug: $(TARGET)
 	@echo "  (debug build)"
 

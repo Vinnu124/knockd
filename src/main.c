@@ -3,11 +3,17 @@
  *
  * Ties together the sniffer, state machine, and firewall manager.
  * Handles signal-based graceful shutdown, argument parsing, and
- * the main packet-processing loop.
+ * the main packet-processing pipeline.
+ *
+ * The daemon runs two threads in parallel:
+ *   - A sniffer thread captures TCP SYN packets and pushes them
+ *     into a shared ring buffer.
+ *   - A processor thread drains the queue, runs the knock state
+ *     machine, and triggers firewall operations.
  *
  * Usage:
  *   sudo ./knockd              # Run in foreground
- *   sudo ./knockd --daemon     # (future) Run as background daemon
+ *   sudo ./knockd -v           # Verbose / debug logging
  */
 
 #include "config.h"
@@ -15,6 +21,7 @@
 #include "sniffer.h"
 #include "knocker.h"
 #include "firewall.h"
+#include "packet_queue.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +30,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <time.h>
+#include <omp.h>
 
 /* ── Globals for signal handler ────────────────────────────────────── */
 static volatile sig_atomic_t g_running = 1;
@@ -30,11 +38,11 @@ static int g_sock_fd = -1;
 
 /*
  * Signal handler for SIGINT (Ctrl+C) and SIGTERM.
- * Sets the running flag to 0 so the main loop exits gracefully.
+ * Sets the running flag to 0 so both threads exit gracefully.
  */
 static void signal_handler(int signum)
 {
-    (void)signum;  /* Suppress unused warning */
+    (void)signum;
     g_running = 0;
 }
 
@@ -58,14 +66,12 @@ static void print_banner(void)
     printf("║  Access timeout:  %d seconds\n", ACCESS_TIMEOUT);
     printf("║  Knock window:    %d seconds\n", KNOCK_WINDOW);
     printf("║  Max clients:     %d\n", MAX_CLIENTS);
+    printf("║  OpenMP threads:  %d\n", omp_get_max_threads());
     printf("║                                                      ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n");
     printf("\n");
 }
 
-/*
- * Print usage information.
- */
 static void print_usage(const char *progname)
 {
     printf("Usage: sudo %s [OPTIONS]\n", progname);
@@ -91,7 +97,7 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
             verbose = 1;
         } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--foreground") == 0) {
-            /* Already the default, just accept it */
+            /* Already the default */
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -107,7 +113,7 @@ int main(int argc, char *argv[])
     }
 
     /* ── Initialize logger ─────────────────────────────────────────── */
-    logger_init(0);  /* 0 = stderr (foreground mode) */
+    logger_init(0);
 
     if (verbose) {
         log_info("Verbose/debug logging enabled");
@@ -121,7 +127,7 @@ int main(int argc, char *argv[])
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;  /* Don't set SA_RESTART — we want recvfrom to be interrupted */
+    sa.sa_flags = 0;
 
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
@@ -130,10 +136,12 @@ int main(int argc, char *argv[])
 
     /* ── Initialize components ─────────────────────────────────────── */
     knocker_init();
+    pktqueue_init();
 
     g_sock_fd = sniffer_init();
     if (g_sock_fd < 0) {
         log_error("Failed to initialize sniffer — exiting");
+        pktqueue_destroy();
         logger_close();
         return 1;
     }
@@ -143,63 +151,89 @@ int main(int argc, char *argv[])
              KNOCK_SEQUENCE[0], KNOCK_SEQUENCE[1], KNOCK_SEQUENCE[2],
              PROTECTED_PORT);
 
-    /* ── Main loop ─────────────────────────────────────────────────── */
-    time_t last_cleanup = time(NULL);
+    /* ── Parallel pipeline: sniffer + processor ────────────────────── */
 
-    while (g_running) {
-        uint32_t src_ip;
-        uint16_t dst_port;
+    #pragma omp parallel sections num_threads(2)
+    {
+        /* ── Sniffer: captures packets, pushes to queue ────────────── */
+        #pragma omp section
+        {
+            while (g_running) {
+                uint32_t src_ip;
+                uint16_t dst_port;
 
-        /* Block until a SYN on a knock port arrives */
-        int ret = sniffer_next_knock(g_sock_fd, &src_ip, &dst_port);
+                int ret = sniffer_next_knock(g_sock_fd, &src_ip, &dst_port);
 
-        if (ret < 0) {
-            if (!g_running) {
-                break;  /* Signal received — exit cleanly */
-            }
-            continue;  /* Transient error — retry */
-        }
-
-        /* Feed the knock to the state machine */
-        knock_result_t result = knocker_process(src_ip, dst_port);
-
-        switch (result) {
-            case KNOCK_COMPLETE: {
-                char ip_str[INET_ADDRSTRLEN];
-                inet_ntop(AF_INET, &src_ip, ip_str, sizeof(ip_str));
-                log_info("==> KNOCK SEQUENCE COMPLETE from %s!", ip_str);
-                log_info("==> Opening port %d for %s (auto-closes in %ds)",
-                         PROTECTED_PORT, ip_str, ACCESS_TIMEOUT);
-
-                if (firewall_open(src_ip) < 0) {
-                    log_error("Failed to open firewall for %s", ip_str);
+                if (ret < 0) {
+                    if (!g_running) break;
+                    continue;
                 }
-                break;
+
+                knock_event_t evt = { .src_ip = src_ip, .dst_port = dst_port };
+                pktqueue_push(&evt);
             }
-            case KNOCK_IN_PROGRESS:
-                /* State machine logged the progress */
-                break;
-            case KNOCK_RESET:
-                /* State machine logged the reset */
-                break;
         }
 
-        /* Periodically clean up stale entries (every 5 seconds) */
-        time_t now = time(NULL);
-        if (now - last_cleanup >= 5) {
-            knocker_cleanup_stale();
-            last_cleanup = now;
+        /* ── Processor: drains queue, runs state machine ───────────── */
+        #pragma omp section
+        {
+            time_t last_cleanup = time(NULL);
+
+            while (g_running) {
+                knock_event_t evt;
+
+                /* Drain all available events from the queue */
+                while (pktqueue_pop(&evt) == 0) {
+                    knock_result_t result = knocker_process(evt.src_ip,
+                                                            evt.dst_port);
+
+                    if (result == KNOCK_COMPLETE) {
+                        char ip_str[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &evt.src_ip, ip_str,
+                                  sizeof(ip_str));
+                        log_info("==> KNOCK SEQUENCE COMPLETE from %s!",
+                                 ip_str);
+                        log_info("==> Opening port %d for %s (auto-closes "
+                                 "in %ds)",
+                                 PROTECTED_PORT, ip_str, ACCESS_TIMEOUT);
+
+                        /* Run firewall open as a task so multiple
+                         * completions don't block each other */
+                        uint32_t task_ip = evt.src_ip;
+                        #pragma omp task firstprivate(task_ip)
+                        {
+                            if (firewall_open(task_ip) < 0) {
+                                char tstr[INET_ADDRSTRLEN];
+                                inet_ntop(AF_INET, &task_ip, tstr,
+                                          sizeof(tstr));
+                                log_error("Failed to open firewall for %s",
+                                          tstr);
+                            }
+                        }
+                    }
+                }
+
+                /* Periodically clean up stale client entries */
+                time_t now = time(NULL);
+                if (now - last_cleanup >= 5) {
+                    knocker_cleanup_stale();
+                    last_cleanup = now;
+                }
+
+                /* Brief sleep to avoid busy-waiting on an empty queue */
+                usleep(10000);
+            }
+
+            #pragma omp taskwait
         }
     }
 
     /* ── Graceful shutdown ─────────────────────────────────────────── */
     log_info("Shutting down...");
 
-    /* Remove all iptables rules we added */
     firewall_cleanup_all();
-
-    /* Close the raw socket */
     sniffer_close(g_sock_fd);
+    pktqueue_destroy();
 
     log_info("knockd stopped. Goodbye!");
     logger_close();

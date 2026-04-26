@@ -232,18 +232,32 @@ void firewall_cleanup_all(void)
 {
     log_info("Cleaning up all firewall rules added by knockd...");
 
+    /*
+     * Take a snapshot of active rules under the lock, then
+     * release the lock and clean them up in parallel.
+     * Each iptables -D call is independent per IP.
+     */
+    uint32_t to_remove[MAX_CLIENTS];
+    int remove_count = 0;
+
     pthread_mutex_lock(&rules_mutex);
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (active_rules[i].active) {
-            char ip_str[INET_ADDRSTRLEN];
-            if (ip_to_safe_str(active_rules[i].ip, ip_str, sizeof(ip_str)) == 0) {
-                log_info("Removing rule for %s", ip_str);
-                run_iptables("-D", ip_str);
-            }
+            to_remove[remove_count++] = active_rules[i].ip;
             active_rules[i].active = 0;
         }
     }
     pthread_mutex_unlock(&rules_mutex);
 
-    log_info("Firewall cleanup complete");
+    /* Parallel cleanup — each iptables call runs in its own thread */
+    #pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < remove_count; i++) {
+        char ip_str[INET_ADDRSTRLEN];
+        if (ip_to_safe_str(to_remove[i], ip_str, sizeof(ip_str)) == 0) {
+            log_info("Removing rule for %s", ip_str);
+            run_iptables("-D", ip_str);
+        }
+    }
+
+    log_info("Firewall cleanup complete (%d rules removed)", remove_count);
 }

@@ -7,6 +7,7 @@
  *
  * Key design:
  *   - Fixed-size array (no malloc) — bounded memory, simple logic
+ *   - Thread-safe: shared table access is serialized
  *   - Stale entries expire after KNOCK_WINDOW seconds
  *   - Wrong-order knocks immediately reset the client's progress
  */
@@ -19,6 +20,7 @@
 #include <time.h>
 #include <arpa/inet.h>
 #include <stdbool.h>
+#include <omp.h>
 
 /* ── Per-client tracking entry ─────────────────────────────────────── */
 typedef struct {
@@ -33,10 +35,11 @@ static knock_client_t clients[MAX_CLIENTS];
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
-/* Format an IP for logging */
+/* Format an IP for logging (thread-local buffer to avoid races) */
 static const char *ip_to_str(uint32_t ip)
 {
     static char buf[INET_ADDRSTRLEN];
+    #pragma omp threadprivate(buf)
     inet_ntop(AF_INET, &ip, buf, sizeof(buf));
     return buf;
 }
@@ -85,72 +88,78 @@ void knocker_init(void)
 
 knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
 {
-    time_t now = time(NULL);
+    knock_result_t result;
 
-    /* Find or create entry for this IP */
-    knock_client_t *c = find_client(src_ip);
+    /* Serialize access to the shared client table */
+    #pragma omp critical(knocker_table)
+    {
+        time_t now = time(NULL);
 
-    if (c == NULL) {
-        /* New IP — only accept if it's knocking the FIRST port */
-        if (dst_port != KNOCK_SEQUENCE[0]) {
-            log_debug("%s knocked port %u (not first port %u) — ignored",
-                      ip_to_str(src_ip), dst_port, KNOCK_SEQUENCE[0]);
-            return KNOCK_RESET;
+        /* Find or create entry for this IP */
+        knock_client_t *c = find_client(src_ip);
+
+        if (c == NULL) {
+            /* New IP — only accept if it's knocking the FIRST port */
+            if (dst_port != KNOCK_SEQUENCE[0]) {
+                log_debug("%s knocked port %u (not first port %u) — ignored",
+                          ip_to_str(src_ip), dst_port, KNOCK_SEQUENCE[0]);
+                result = KNOCK_RESET;
+            } else {
+                /* Allocate a new entry */
+                c = alloc_client();
+                c->ip           = src_ip;
+                c->current_step = 0;
+                c->last_knock   = now;
+                c->active       = true;
+                /* Fall through to the port check below */
+                goto check_port;
+            }
+        } else {
+            check_port:
+            /* Check for timeout between knocks */
+            if (c->current_step > 0 && (now - c->last_knock) > KNOCK_WINDOW) {
+                log_info("%s timed out (%.0fs since last knock) — resetting",
+                         ip_to_str(src_ip), difftime(now, c->last_knock));
+                c->current_step = 0;
+            }
+
+            /* Check if this knock matches the expected port */
+            if (dst_port == KNOCK_SEQUENCE[c->current_step]) {
+                c->current_step++;
+                c->last_knock = now;
+
+                log_info("%s knocked port %u — step %d/%d",
+                         ip_to_str(src_ip), dst_port,
+                         c->current_step, KNOCK_SEQ_LEN);
+
+                if (c->current_step >= KNOCK_SEQ_LEN) {
+                    log_info("*** %s completed the knock sequence! ***",
+                             ip_to_str(src_ip));
+                    c->active = false;
+                    result = KNOCK_COMPLETE;
+                } else {
+                    result = KNOCK_IN_PROGRESS;
+                }
+            } else {
+                log_info("%s knocked port %u (expected %u) — resetting",
+                         ip_to_str(src_ip), dst_port,
+                         KNOCK_SEQUENCE[c->current_step]);
+
+                if (dst_port == KNOCK_SEQUENCE[0]) {
+                    c->current_step = 1;
+                    c->last_knock   = now;
+                    log_info("%s restarted sequence at step 1/%d",
+                             ip_to_str(src_ip), KNOCK_SEQ_LEN);
+                    result = KNOCK_IN_PROGRESS;
+                } else {
+                    c->active = false;
+                    result = KNOCK_RESET;
+                }
+            }
         }
-
-        /* Allocate a new entry */
-        c = alloc_client();
-        c->ip           = src_ip;
-        c->current_step = 0;
-        c->last_knock   = now;
-        c->active       = true;
     }
 
-    /* Check for timeout between knocks */
-    if (c->current_step > 0 && (now - c->last_knock) > KNOCK_WINDOW) {
-        log_info("%s timed out (%.0fs since last knock) — resetting",
-                 ip_to_str(src_ip), difftime(now, c->last_knock));
-        c->current_step = 0;
-        /* Fall through to check if this knock starts a new sequence */
-    }
-
-    /* Check if this knock matches the expected port */
-    if (dst_port == KNOCK_SEQUENCE[c->current_step]) {
-        c->current_step++;
-        c->last_knock = now;
-
-        log_info("%s knocked port %u — step %d/%d",
-                 ip_to_str(src_ip), dst_port,
-                 c->current_step, KNOCK_SEQ_LEN);
-
-        /* Check if the full sequence is complete */
-        if (c->current_step >= KNOCK_SEQ_LEN) {
-            log_info("*** %s completed the knock sequence! ***",
-                     ip_to_str(src_ip));
-            /* Reset this client so they can knock again later */
-            c->active = false;
-            return KNOCK_COMPLETE;
-        }
-
-        return KNOCK_IN_PROGRESS;
-    } else {
-        /* Wrong port — reset progress */
-        log_info("%s knocked port %u (expected %u) — resetting",
-                 ip_to_str(src_ip), dst_port,
-                 KNOCK_SEQUENCE[c->current_step]);
-
-        /* But if it's the first port, start a new sequence */
-        if (dst_port == KNOCK_SEQUENCE[0]) {
-            c->current_step = 1;
-            c->last_knock   = now;
-            log_info("%s restarted sequence at step 1/%d",
-                     ip_to_str(src_ip), KNOCK_SEQ_LEN);
-            return KNOCK_IN_PROGRESS;
-        }
-
-        c->active = false;
-        return KNOCK_RESET;
-    }
+    return result;
 }
 
 void knocker_cleanup_stale(void)
@@ -158,6 +167,8 @@ void knocker_cleanup_stale(void)
     time_t now = time(NULL);
     int cleaned = 0;
 
+    /* Scan each slot independently */
+    #pragma omp parallel for reduction(+:cleaned) schedule(static)
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active &&
             (now - clients[i].last_knock) > KNOCK_WINDOW) {
