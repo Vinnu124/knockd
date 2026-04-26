@@ -158,6 +158,8 @@ int main(int argc, char *argv[])
         /* ── Sniffer: captures packets, pushes to queue ────────────── */
         #pragma omp section
         {
+            log_info("[OMP] Sniffer running on thread %d", omp_get_thread_num());
+
             while (g_running) {
                 uint32_t src_ip;
                 uint16_t dst_port;
@@ -170,13 +172,19 @@ int main(int argc, char *argv[])
                 }
 
                 knock_event_t evt = { .src_ip = src_ip, .dst_port = dst_port };
+                log_info("[OMP] Thread %d pushing knock event to queue",
+                         omp_get_thread_num());
                 pktqueue_push(&evt);
             }
+
+            log_info("[OMP] Sniffer thread %d exiting", omp_get_thread_num());
         }
 
         /* ── Processor: drains queue, runs state machine ───────────── */
         #pragma omp section
         {
+            log_info("[OMP] Processor running on thread %d", omp_get_thread_num());
+
             time_t last_cleanup = time(NULL);
 
             while (g_running) {
@@ -184,6 +192,8 @@ int main(int argc, char *argv[])
 
                 /* Drain all available events from the queue */
                 while (pktqueue_pop(&evt) == 0) {
+                    log_info("[OMP] Thread %d processing knock event",
+                             omp_get_thread_num());
                     knock_result_t result = knocker_process(evt.src_ip,
                                                             evt.dst_port);
 
@@ -202,6 +212,8 @@ int main(int argc, char *argv[])
                         uint32_t task_ip = evt.src_ip;
                         #pragma omp task firstprivate(task_ip)
                         {
+                            log_info("[OMP] Firewall task running on thread %d",
+                                     omp_get_thread_num());
                             if (firewall_open(task_ip) < 0) {
                                 char tstr[INET_ADDRSTRLEN];
                                 inet_ntop(AF_INET, &task_ip, tstr,
@@ -225,6 +237,7 @@ int main(int argc, char *argv[])
             }
 
             #pragma omp taskwait
+            log_info("[OMP] Processor thread %d exiting", omp_get_thread_num());
         }
     }
 

@@ -91,6 +91,8 @@ knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
     knock_result_t result;
 
     /* Serialize access to the shared client table */
+    log_info("[OMP] Thread %d entering critical section (knocker_table)",
+             omp_get_thread_num());
     #pragma omp critical(knocker_table)
     {
         time_t now = time(NULL);
@@ -158,6 +160,8 @@ knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
             }
         }
     }
+    log_info("[OMP] Thread %d exiting critical section (knocker_table)",
+             omp_get_thread_num());
 
     return result;
 }
@@ -168,12 +172,13 @@ void knocker_cleanup_stale(void)
     int cleaned = 0;
 
     /* Scan each slot independently */
+    log_info("[OMP] Starting parallel stale cleanup (%d slots)", MAX_CLIENTS);
     #pragma omp parallel for reduction(+:cleaned) schedule(static)
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (clients[i].active &&
             (now - clients[i].last_knock) > KNOCK_WINDOW) {
-            log_debug("Cleaning stale entry for %s",
-                      ip_to_str(clients[i].ip));
+            log_info("[OMP] Thread %d cleaning slot %d",
+                     omp_get_thread_num(), i);
             clients[i].active = false;
             cleaned++;
         }
