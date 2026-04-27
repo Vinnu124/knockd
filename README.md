@@ -120,27 +120,7 @@ Press `Ctrl+C`. The daemon catches `SIGINT`/`SIGTERM` and removes every iptables
 
 ## Verbose Output (what to expect)
 
-```
-╔══════════════════════════════════════════════════════╗
-║          PORT KNOCKING DAEMON (knockd)              ║
-╠══════════════════════════════════════════════════════╣
-║  Knock sequence:  7000 → 8000 → 9000               ║
-║  Protected port:  22                                ║
-║  Access timeout:  30 seconds                        ║
-║  Knock window:    15 seconds                        ║
-╚══════════════════════════════════════════════════════╝
-
-[knockd 11:00:01 INFO ] Raw socket created (fd=3)
-[knockd 11:00:01 INFO ] Listening for knock sequences...
-[knockd 11:00:05 INFO ] 192.168.1.42 knocked port 7000 — step 1/3
-[knockd 11:00:05 INFO ] 192.168.1.42 knocked port 8000 — step 2/3
-[knockd 11:00:06 INFO ] 192.168.1.42 knocked port 9000 — step 3/3
-[knockd 11:00:06 INFO ] *** 192.168.1.42 completed the knock sequence! ***
-[knockd 11:00:06 INFO ] *** Port 22 OPEN for 192.168.1.42 (expires in 30s) ***
-[knockd 11:00:36 INFO ] Access expired for 192.168.1.42 — closing port 22
-[knockd 11:00:36 INFO ] Port 22 CLOSED for 192.168.1.42
-```
-
+![alt text](image.png)
 ---
 
 ## Security Notes
