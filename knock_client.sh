@@ -29,20 +29,31 @@ NC='\033[0m' # No Color
 
 # ── Argument parsing ─────────────────────────────────────────────────
 if [ -z "$1" ]; then
-    echo -e "${RED}Usage: $0 <target_ip> [--ssh [user]]${NC}"
+    echo -e "${RED}Usage: $0 <target_ip> [--ssh [user]] [--udp]${NC}"
     exit 1
 fi
 
 TARGET="$1"
 DO_SSH=0
+DO_UDP=0
 SSH_USER="$USER"
 
-if [ "$2" = "--ssh" ]; then
-    DO_SSH=1
-    if [ -n "$3" ]; then
-        SSH_USER="$3"
-    fi
-fi
+shift
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --ssh)
+            DO_SSH=1
+            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+                SSH_USER="$2"
+                shift
+            fi
+            ;;
+        --udp)
+            DO_UDP=1
+            ;;
+    esac
+    shift
+done
 
 # ── Detect available knock tool ──────────────────────────────────────
 KNOCK_TOOL=""
@@ -58,11 +69,22 @@ else
     exit 1
 fi
 
+if [ "$DO_UDP" -eq 1 ] && [ "$KNOCK_TOOL" != "nmap" ]; then
+    echo -e "${RED}Error: UDP knocking currently requires 'nmap' to be installed.${NC}"
+    exit 1
+fi
+
+PROTO_STR="TCP SYN"
+if [ "$DO_UDP" -eq 1 ]; then
+    PROTO_STR="UDP"
+fi
+
 echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
 echo -e "${CYAN}║       PORT KNOCK CLIENT                  ║${NC}"
 echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
 echo -e "${CYAN}║  Target:  ${GREEN}${TARGET}${NC}"
 echo -e "${CYAN}║  Tool:    ${GREEN}${KNOCK_TOOL}${NC}"
+echo -e "${CYAN}║  Proto:   ${GREEN}${PROTO_STR}${NC}"
 echo -e "${CYAN}║  Ports:   ${GREEN}${KNOCK_PORTS[*]}${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
 echo ""
@@ -73,15 +95,18 @@ send_knock() {
 
     case "$KNOCK_TOOL" in
         nmap)
-            # Send a single SYN probe — no ping, no retries
-            nmap -Pn --host-timeout 1s --max-retries 0 -p "$port" "$TARGET" &>/dev/null
+            if [ "$DO_UDP" -eq 1 ]; then
+                # Send a single UDP probe
+                sudo nmap -sU -Pn --host-timeout 1s --max-retries 0 -p "$port" "$TARGET" &>/dev/null
+            else
+                # Send a single TCP SYN probe
+                nmap -Pn --host-timeout 1s --max-retries 0 -p "$port" "$TARGET" &>/dev/null
+            fi
             ;;
         ncat)
-            # Attempt TCP connect with short timeout (will fail, but sends SYN)
             ncat -w 1 "$TARGET" "$port" </dev/null &>/dev/null 2>&1 || true
             ;;
         nc)
-            # Attempt TCP connect with short timeout
             nc -z -w 1 "$TARGET" "$port" &>/dev/null 2>&1 || true
             ;;
     esac

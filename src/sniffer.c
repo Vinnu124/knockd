@@ -25,6 +25,7 @@
 #include <net/ethernet.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>   /* struct tcphdr */
+#include <netinet/udp.h>   /* struct udphdr */
 #include <arpa/inet.h>
 
 /* Maximum packet buffer size */
@@ -100,35 +101,39 @@ int sniffer_next_knock(int sock_fd, uint32_t *src_ip, uint16_t *dst_port)
 
         struct iphdr *iph = (struct iphdr *)(buffer + ip_offset);
 
-        /* Verify it's TCP (protocol 6) */
-        if (iph->protocol != IPPROTO_TCP) {
-            continue;
+        /* ── Layer 4: TCP or UDP Header ─────────────────────────────── */
+        uint16_t dport = 0;
+        const char *proto_name = "";
+
+        if (iph->protocol == IPPROTO_TCP) {
+            size_t tcp_offset = ip_offset + ip_hdr_len;
+            if ((size_t)pkt_len < tcp_offset + sizeof(struct tcphdr)) {
+                continue;  /* Truncated TCP header */
+            }
+            struct tcphdr *tcph = (struct tcphdr *)(buffer + tcp_offset);
+
+            /* We ONLY care about SYN packets (SYN=1, ACK=0). */
+            if (!(tcph->syn == 1 && tcph->ack == 0)) {
+                continue;
+            }
+            dport = ntohs(tcph->dest);
+            proto_name = "TCP SYN";
+        } 
+        else if (iph->protocol == IPPROTO_UDP) {
+            size_t udp_offset = ip_offset + ip_hdr_len;
+            if ((size_t)pkt_len < udp_offset + sizeof(struct udphdr)) {
+                continue;  /* Truncated UDP header */
+            }
+            struct udphdr *udph = (struct udphdr *)(buffer + udp_offset);
+            
+            dport = ntohs(udph->dest);
+            proto_name = "UDP";
+        }
+        else {
+            continue; /* Not TCP or UDP */
         }
 
-        /* IP header length (ihl is in 32-bit words) */
-        size_t ip_hdr_len = (size_t)iph->ihl * 4;
-        if (ip_hdr_len < 20) {
-            continue;  /* Invalid IP header length */
-        }
-
-        /* ── Layer 4: TCP Header ────────────────────────────────── */
-        size_t tcp_offset = ip_offset + ip_hdr_len;
-        if ((size_t)pkt_len < tcp_offset + sizeof(struct tcphdr)) {
-            continue;  /* Truncated TCP header */
-        }
-
-        struct tcphdr *tcph = (struct tcphdr *)(buffer + tcp_offset);
-
-        /* We ONLY care about SYN packets (SYN=1, ACK=0).
-         * This filters out established connections, RSTs, FINs, etc. */
-        if (!(tcph->syn == 1 && tcph->ack == 0)) {
-            continue;
-        }
-
-        /* Extract destination port (convert from network byte order) */
-        uint16_t dport = ntohs(tcph->dest);
-
-        /* Check if this SYN is aimed at one of our knock ports */
+        /* Check if this is aimed at one of our knock ports */
         if (!is_knock_port(dport)) {
             continue;  /* Not a knock port — ignore */
         }
@@ -140,7 +145,7 @@ int sniffer_next_knock(int sock_fd, uint32_t *src_ip, uint16_t *dst_port)
         /* Debug: log the raw knock */
         char ip_str[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &iph->saddr, ip_str, sizeof(ip_str));
-        log_debug("SYN captured: %s → port %u", ip_str, dport);
+        log_debug("%s captured: %s → port %u", proto_name, ip_str, dport);
 
         return 0;
     }
