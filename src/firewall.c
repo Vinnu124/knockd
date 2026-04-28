@@ -260,4 +260,30 @@ void firewall_cleanup_all(void)
     }
 
     log_info("Firewall cleanup complete (%d rules removed)", remove_count);
+
+    /* Also remove the baseline DROP rule we used for testing */
+    log_info("Removing baseline DROP rule for port %d...", PROTECTED_PORT);
+    pid_t pid = fork();
+    if (pid == 0) {
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%d", PROTECTED_PORT);
+        char *argv[] = {
+            (char *)IPTABLES_PATH,
+            "-D", "INPUT",
+            "-p", "tcp",
+            "--dport", port_str,
+            "-j", "DROP",
+            NULL
+        };
+        execv(IPTABLES_PATH, argv);
+        _exit(127);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            log_info("Baseline DROP rule removed successfully");
+        } else {
+            log_warn("Failed to remove baseline DROP rule (maybe it wasn't added?)");
+        }
+    }
 }
