@@ -100,6 +100,7 @@ int sniffer_next_knock(int sock_fd, uint32_t *src_ip, uint16_t *dst_port)
         }
 
         struct iphdr *iph = (struct iphdr *)(buffer + ip_offset);
+        size_t ip_hdr_len = iph->ihl * 4;
 
         /* ── Layer 4: TCP or UDP Header ─────────────────────────────── */
         uint16_t dport = 0;
