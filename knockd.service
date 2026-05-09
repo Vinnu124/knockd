@@ -1,0 +1,19 @@
+[Unit]
+Description=Port Knocking Daemon (knockd)
+After=network.target
+
+[Service]
+Type=simple
+# Requires root for raw sockets and iptables
+User=root
+ExecStart=/usr/local/bin/knockd
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
