@@ -21,7 +21,7 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
 #include <omp.h>
-
+#include <stdlib.h>
 /* ── Per-client tracking entry ─────────────────────────────────────── */
 typedef struct {
     uint32_t    ip;             /* Client IP (network byte order)     */
@@ -31,7 +31,7 @@ typedef struct {
 } knock_client_t;
 
 /* Fixed-size client table */
-static knock_client_t clients[MAX_CLIENTS];
+static knock_client_t *clients = NULL;
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
 
@@ -82,7 +82,11 @@ static knock_client_t *alloc_client(void)
 
 void knocker_init(void)
 {
-    memset(clients, 0, sizeof(clients));
+    clients = calloc(MAX_CLIENTS, sizeof(knock_client_t));
+    if (!clients) {
+        log_error("Failed to allocate memory for knocker clients");
+        exit(1);
+    }
     log_info("Knock state machine initialized (capacity: %d clients)", MAX_CLIENTS);
 }
 

@@ -32,7 +32,7 @@ typedef struct {
     int      active;
 } active_rule_t;
 
-static active_rule_t active_rules[MAX_CLIENTS];
+static active_rule_t *active_rules = NULL;
 static pthread_mutex_t rules_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* ── Helpers ───────────────────────────────────────────────────────── */
@@ -138,6 +138,9 @@ static void *expiry_thread(void *arg)
 static void track_rule_add(uint32_t ip)
 {
     pthread_mutex_lock(&rules_mutex);
+    if (!active_rules) {
+        active_rules = calloc(MAX_CLIENTS, sizeof(active_rule_t));
+    }
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!active_rules[i].active) {
             active_rules[i].ip     = ip;
@@ -151,6 +154,10 @@ static void track_rule_add(uint32_t ip)
 static void track_rule_remove(uint32_t ip)
 {
     pthread_mutex_lock(&rules_mutex);
+    if (!active_rules) {
+        pthread_mutex_unlock(&rules_mutex);
+        return;
+    }
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (active_rules[i].active && active_rules[i].ip == ip) {
             active_rules[i].active = 0;
@@ -237,14 +244,17 @@ void firewall_cleanup_all(void)
      * release the lock and clean them up in parallel.
      * Each iptables -D call is independent per IP.
      */
-    uint32_t to_remove[MAX_CLIENTS];
+    uint32_t *to_remove = malloc(MAX_CLIENTS * sizeof(uint32_t));
+    if (!to_remove) return;
     int remove_count = 0;
 
     pthread_mutex_lock(&rules_mutex);
-    for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (active_rules[i].active) {
-            to_remove[remove_count++] = active_rules[i].ip;
-            active_rules[i].active = 0;
+    if (active_rules) {
+        for (int i = 0; i < MAX_CLIENTS; i++) {
+            if (active_rules[i].active) {
+                to_remove[remove_count++] = active_rules[i].ip;
+                active_rules[i].active = 0;
+            }
         }
     }
     pthread_mutex_unlock(&rules_mutex);
@@ -258,6 +268,7 @@ void firewall_cleanup_all(void)
             run_iptables("-D", ip_str);
         }
     }
+    free(to_remove);
 
     log_info("Firewall cleanup complete (%d rules removed)", remove_count);
 

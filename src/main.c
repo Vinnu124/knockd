@@ -119,6 +119,9 @@ int main(int argc, char *argv[])
         log_info("Verbose/debug logging enabled");
     }
 
+    /* ── Load Configuration ────────────────────────────────────────── */
+    config_load("/etc/knockd.conf");
+
     /* ── Print banner ──────────────────────────────────────────────── */
     print_banner();
 

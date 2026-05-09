@@ -1,0 +1,25 @@
+# Configuration file for knockd
+# Default location: /etc/knockd.conf
+
+# ── Knock Sequence ──
+# Comma-separated list of ports that must be knocked in order.
+sequence = 7000, 8000, 9000
+
+# ── Protected Port ──
+# The TCP port to open when a successful knock is received.
+port = 22
+
+# ── Timing ──
+# How long (in seconds) the port stays open before auto-closing.
+timeout = 30
+
+# Max seconds allowed between knocks before the sequence resets.
+window = 15
+
+# ── Capacity ──
+# Max number of concurrent clients to track.
+max_clients = 64
+
+# ── Logging ──
+# 0 = ERROR, 1 = WARN, 2 = INFO, 3 = DEBUG
+log_level = 2
