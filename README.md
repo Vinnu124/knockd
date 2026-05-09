@@ -9,17 +9,16 @@ No open ports. No listening sockets. No trace. Just a raw packet sniffer watchin
 ## How It Works
 
 ```
-Client knocks:   TCP SYN → 7000 → 8000 → 9000
+Client knocks:   TCP SYN or UDP → 7000 → 8000 → 9000
                                   ↓
-Daemon detects:  Raw socket sniffs SYN packets, tracks sequence per IP
+Daemon detects:  Raw socket sniffs packets, tracks sequence per IP
                                   ↓
 Firewall opens:  iptables -I INPUT -s <YOUR_IP> -p tcp --dport 22 -j ACCEPT
                                   ↓
 30 seconds pass: Rule is automatically removed
 ```
 
-The sniffer uses `AF_PACKET` raw sockets — it captures packets at the network level without binding to any port, making the daemon completely invisible to port scanners.
-
+The sniffer uses `AF_PACKET` raw sockets, capturing packets at the network level without binding to any port. This makes the daemon completely invisible to port scanners. Both TCP SYN and UDP knocks are supported.
 
 ---
 
@@ -36,38 +35,35 @@ sudo dnf install gcc make nmap iptables-nft
 
 ---
 
-## Configuration
+## Installation & Configuration
 
-Edit `include/config.h` before building to set your knock sequence and timeouts:
-
-```c
-/* Secret knock sequence */
-static const uint16_t KNOCK_SEQUENCE[] = { 7000, 8000, 9000 };
-#define KNOCK_SEQ_LEN   3
-
-/* Port to unlock after a successful knock */
-#define PROTECTED_PORT  22
-
-/* Seconds before access is automatically revoked */
-#define ACCESS_TIMEOUT  30
-
-/* Max seconds allowed between consecutive knocks */
-#define KNOCK_WINDOW    15
-```
-
----
-
-## Build
-
+1. Build and install the daemon:
 ```bash
-make          # optimised build
-make debug    # debug symbols, no optimisation
-make clean    # remove binary
+make
+sudo make install
+```
+
+2. Edit your configuration file at `/etc/knockd.conf`:
+```ini
+# Secret sequence of ports
+sequence = 7000, 8000, 9000
+# Port to unlock after a successful knock
+port = 22
+# Seconds before access is automatically revoked
+timeout = 30
+# Max seconds allowed between consecutive knocks
+window = 15
+```
+
+3. Enable and start the systemd service:
+```bash
+sudo systemctl enable knockd
+sudo systemctl start knockd
 ```
 
 ---
 
-## Running
+## Running & Knocking
 
 ### 1. Set up the firewall
 
@@ -81,14 +77,7 @@ sudo iptables -I INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 22 -j DROP
 ```
 
-### 2. Start the daemon
-
-```bash
-sudo ./knockd        # normal mode
-sudo ./knockd -v     # verbose — prints every knock and state change
-```
-
-### 3. Send the knock sequence
+### 2. Send the knock sequence
 
 From any machine with `nmap` (or use the included script):
 
@@ -99,22 +88,29 @@ From any machine with `nmap` (or use the included script):
 # With automatic SSH after knocking
 ./knock_client.sh <server-ip> --ssh
 
+# (Optional) Use the --udp flag as well 
+./knock_client.sh <server-ip> --udp
+
 # Or manually with nmap
 nmap -Pn --max-retries 0 -p 7000 <server-ip> && sleep 0.5
 nmap -Pn --max-retries 0 -p 8000 <server-ip> && sleep 0.5
 nmap -Pn --max-retries 0 -p 9000 <server-ip>
 ```
 
-### 4. SSH in
+### 3. SSH in
 
 ```bash
 ssh user@<server-ip>
 # You have 30 seconds — port closes automatically after that
 ```
 
-### 5. Stop the daemon
+### 4. Viewing Logs
 
-Press `Ctrl+C`. The daemon catches `SIGINT`/`SIGTERM` and removes every iptables rule it added before exiting. The firewall is left exactly as it was.
+Since `knockd` runs as a systemd service, its logs are safely stored in the journal:
+```bash
+# Watch live logs
+sudo journalctl -u knockd -f
+```
 
 ---
 
@@ -128,7 +124,7 @@ Press `Ctrl+C`. The daemon catches `SIGINT`/`SIGTERM` and removes every iptables
 - **No shell injection** — `iptables` is invoked via `fork()`/`execv()`, never `system()`
 - **IP validation** — all IPs pass through `inet_ntop()` before being used in any command
 - **Per-IP rules** — only the knocking IP is granted access, not the whole network
-- **Auto-cleanup** — `Ctrl+C` or `kill` triggers graceful removal of all added rules
+- **Auto-cleanup** — `systemctl stop knockd` triggers graceful removal of all added rules
 - **Invisible** — no ports are bound; the daemon cannot be found by a port scan
 
 ---
@@ -137,7 +133,6 @@ Press `Ctrl+C`. The daemon catches `SIGINT`/`SIGTERM` and removes every iptables
 
 | Symptom | Fix |
 |---|---|
-| `must be run as root` | Use `sudo ./knockd` |
 | `Failed to create raw socket` | Confirm you are root and on Linux (not macOS) |
 | Knocks not detected | Run `sudo tcpdump -i any port 7000` to verify packets arrive at the machine |
 | `iptables` errors | Run `sudo dnf install iptables-nft` and check `iptables -L` |
