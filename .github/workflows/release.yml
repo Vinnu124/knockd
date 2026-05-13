@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make libpcap-dev
+
+      - name: Build
+        run: make
+
+      - name: Package release assets
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          mkdir -p release
+          cp knockd release/
+          cp knockd.conf.example release/
+          cp knockd.service release/
+          cp knock_client.sh release/
+          tar -czf knockd-${VERSION}-linux-x86_64.tar.gz -C release .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: knockd-*.tar.gz
+          body: |
+            ## Installation
+            
+```bash
+            tar -xzf knockd-${{ github.ref_name }}-linux-x86_64.tar.gz
+            sudo make install
+            sudo systemctl start knockd
+```
