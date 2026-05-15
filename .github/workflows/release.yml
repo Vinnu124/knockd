@@ -41,8 +41,6 @@ jobs:
           body: |
             ## Installation
             
-```bash
             tar -xzf knockd-${{ github.ref_name }}-linux-x86_64.tar.gz
             sudo make install
             sudo systemctl start knockd
-```
