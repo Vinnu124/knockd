@@ -23,10 +23,15 @@
 #include <omp.h>
 #include <stdlib.h>
 /* ── Per-client tracking entry ─────────────────────────────────────── */
+/* Dedup window: ignore a repeated knock on the same port within this
+ * many seconds. Prevents nmap's duplicate SYNs from resetting progress. */
+#define KNOCK_DEDUP_WINDOW 5   /* kernel TCP SYN retransmits can arrive up to ~3s later */
+
 typedef struct {
     uint32_t    ip;             /* Client IP (network byte order)     */
     int         current_step;   /* Steps completed (0 = no progress)  */
     time_t      last_knock;     /* Timestamp of last valid knock      */
+    uint16_t    last_port;      /* Port of the last accepted knock     */
     bool        active;         /* Is this slot in use?               */
 } knock_client_t;
 
@@ -120,6 +125,16 @@ knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
             }
         } else {
             check_port:
+            /* Deduplicate: ignore a repeat knock on the same port within
+             * KNOCK_DEDUP_WINDOW seconds (handles nmap duplicate SYNs). */
+            if (dst_port == c->last_port &&
+                (now - c->last_knock) <= KNOCK_DEDUP_WINDOW) {
+                log_debug("%s duplicate knock on port %u — ignored (dedup)",
+                          ip_to_str(src_ip), dst_port);
+                result = KNOCK_IN_PROGRESS;
+                goto done;
+            }
+
             /* Check for timeout between knocks */
             if (c->current_step > 0 && (now - c->last_knock) > KNOCK_WINDOW) {
                 log_info("%s timed out (%.0fs since last knock) — resetting",
@@ -131,6 +146,7 @@ knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
             if (dst_port == KNOCK_SEQUENCE[c->current_step]) {
                 c->current_step++;
                 c->last_knock = now;
+                c->last_port  = dst_port;   /* record for dedup */
 
                 log_info("%s knocked port %u — step %d/%d",
                          ip_to_str(src_ip), dst_port,
@@ -161,6 +177,7 @@ knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
                 }
             }
         }
+        done:;
     }
 
     return result;
