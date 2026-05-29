@@ -57,16 +57,33 @@ done
 
 # ── Detect available knock tool ──────────────────────────────────────
 KNOCK_TOOL=""
-if command -v nmap &>/dev/null; then
-    KNOCK_TOOL="nmap"
-elif command -v ncat &>/dev/null; then
-    KNOCK_TOOL="ncat"
-elif command -v nc &>/dev/null; then
-    KNOCK_TOOL="nc"
+if [ "$DO_UDP" -eq 1 ]; then
+    # UDP knocking requires nmap (nc/ncat can't send raw UDP probes easily)
+    if command -v nmap &>/dev/null; then
+        KNOCK_TOOL="nmap"
+    else
+        echo -e "${RED}Error: UDP knocking requires nmap. Install with:${NC}"
+        echo "  sudo dnf install nmap   # Fedora/RHEL"
+        echo "  brew install nmap       # macOS"
+        exit 1
+    fi
 else
-    echo -e "${RED}Error: No suitable tool found. Install nmap:${NC}"
-    echo "  sudo dnf install nmap"
-    exit 1
+    # For TCP: prefer nc/ncat — they complete a connect() which gets an RST back
+    # immediately (port closed), so the kernel has NO reason to retransmit the SYN.
+    # nmap leaves the SYN unanswered (stealth scan), causing the OS to retransmit
+    # the SYN up to 3 s later, which then arrives as a spurious second knock.
+    if command -v nc &>/dev/null; then
+        KNOCK_TOOL="nc"
+    elif command -v ncat &>/dev/null; then
+        KNOCK_TOOL="ncat"
+    elif command -v nmap &>/dev/null; then
+        KNOCK_TOOL="nmap"
+    else
+        echo -e "${RED}Error: No suitable tool found. Install nc or nmap:${NC}"
+        echo "  sudo dnf install nmap   # Fedora/RHEL"
+        echo "  brew install nmap       # macOS"
+        exit 1
+    fi
 fi
 
 if [ "$DO_UDP" -eq 1 ] && [ "$KNOCK_TOOL" != "nmap" ]; then
@@ -112,14 +129,20 @@ send_knock() {
     esac
 }
 
+KNOCK_FAILED=0
 for i in "${!KNOCK_PORTS[@]}"; do
     port="${KNOCK_PORTS[$i]}"
     step=$((i + 1))
     total=${#KNOCK_PORTS[@]}
 
-    echo -ne "  ${YELLOW}Knock ${step}/${total}:${NC} Sending SYN to port ${GREEN}${port}${NC}..."
+    echo -ne "  ${YELLOW}Knock ${step}/${total}:${NC} Sending to port ${GREEN}${port}${NC}..."
     send_knock "$port"
-    echo -e " ${GREEN}✓${NC}"
+    if [ $? -ne 0 ] && [ "$KNOCK_TOOL" = "nmap" ]; then
+        echo -e " ${RED}FAILED${NC}"
+        KNOCK_FAILED=1
+        break
+    fi
+    echo -e " ${GREEN}sent${NC}"
 
     # Delay between knocks (but not after the last one)
     if [ "$step" -lt "$total" ]; then
@@ -128,17 +151,35 @@ for i in "${!KNOCK_PORTS[@]}"; do
 done
 
 echo ""
-echo -e "  ${GREEN}✓ Knock sequence complete!${NC}"
+
+if [ "$KNOCK_FAILED" -eq 1 ]; then
+    echo -e "  ${RED}✗ Knock sequence failed. Check that the server is reachable.${NC}"
+    echo ""
+    exit 1
+fi
+
+echo -e "  ${GREEN}✓ All ${#KNOCK_PORTS[@]} knocks sent successfully!${NC}"
+echo ""
+echo -e "  ${CYAN}The server daemon will now verify the sequence.${NC}"
+echo -e "  ${CYAN}If correct, port 22 will open for you for ${YELLOW}30 seconds${CYAN}.${NC}"
 echo ""
 
 # ── Optional SSH connection ──────────────────────────────────────────
 if [ "$DO_SSH" -eq 1 ]; then
-    echo -e "  ${CYAN}Attempting SSH connection...${NC}"
-    echo -e "  ${YELLOW}ssh ${SSH_USER}@${TARGET}${NC}"
+    echo -e "  ${CYAN}Connecting via SSH...${NC}"
     echo ""
     sleep 1  # Give the daemon a moment to process
-    ssh "${SSH_USER}@${TARGET}"
+    if ssh -o ConnectTimeout=10 "${SSH_USER}@${TARGET}"; then
+        echo ""
+        echo -e "  ${GREEN}✓ SSH session ended cleanly.${NC}"
+    else
+        echo ""
+        echo -e "  ${RED}✗ SSH failed. The knock may not have completed in time, or SSH is not running on the server.${NC}"
+        exit 1
+    fi
 else
-    echo -e "  ${CYAN}Now try:${NC} ssh ${SSH_USER}@${TARGET}"
-    echo -e "  ${YELLOW}(You have 30 seconds before the port closes)${NC}"
+    echo -e "  ${YELLOW}Run this now (you have ~30 seconds):${NC}"
+    echo ""
+    echo -e "    ${GREEN}ssh ${SSH_USER}@${TARGET}${NC}"
+    echo ""
 fi
