@@ -139,7 +139,7 @@ You can still keep `nmap` installed. The client script uses it as a fallback for
 
 ## Verbose Output (what to expect)
 
-![knockd output](image.png)
+![knockd output](assets/image.png)
 
 ---
 
