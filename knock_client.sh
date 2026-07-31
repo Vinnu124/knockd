@@ -28,8 +28,8 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # ── Argument parsing ─────────────────────────────────────────────────
-if [ -z "$1" ]; then
-    echo -e "${RED}Usage: $0 <target_ip> [--ssh [user]] [--udp]${NC}"
+if [ -z "$1" ] || [[ "$1" == "-h" ]] || [[ "$1" == "--help" ]]; then
+    echo -e "${RED}Usage: $0 <target_ip> [-p port1,port2...] [-d delay] [--ssh [user]] [--udp]${NC}"
     exit 1
 fi
 
@@ -41,15 +41,37 @@ SSH_USER="$USER"
 shift
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        -p|--ports)
+            if [ -n "$2" ] && [[ "$2" != -* ]]; then
+                IFS=',' read -ra KNOCK_PORTS <<< "$2"
+                shift
+            else
+                echo -e "${RED}Error: -p requires a comma-separated list of ports.${NC}"
+                exit 1
+            fi
+            ;;
+        -d|--delay)
+            if [ -n "$2" ] && [[ "$2" != -* ]]; then
+                DELAY="$2"
+                shift
+            else
+                echo -e "${RED}Error: -d requires a delay value in seconds.${NC}"
+                exit 1
+            fi
+            ;;
         --ssh)
             DO_SSH=1
-            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+            if [ -n "$2" ] && [[ "$2" != -* ]]; then
                 SSH_USER="$2"
                 shift
             fi
             ;;
         --udp)
             DO_UDP=1
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            exit 1
             ;;
     esac
     shift
