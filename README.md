@@ -45,15 +45,20 @@ sudo make install
 
 2. Edit your configuration file at `/etc/knockd.conf`:
 ```ini
-# Secret sequence of ports
+# Secret sequence of ports (default: 7000, 8000, 9000)
 sequence = 7000, 8000, 9000
-# Port to unlock after a successful knock
+# Port to unlock after a successful knock (default: 22)
 port = 22
-# Seconds before access is automatically revoked
+# Seconds before access is automatically revoked (default: 30)
 timeout = 30
-# Max seconds allowed between consecutive knocks
+# Max seconds allowed between consecutive knocks (default: 15)
 window = 15
+# Max concurrent client slots in memory (default: 64)
+max_clients = 64
+# Log verbosity: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG (default: 2)
+log_level = 2
 ```
+*Note: Any invalid or out-of-range config values are automatically reset to safe defaults with warning logs.*
 
 3. Enable and start the systemd service:
 ```bash
@@ -84,6 +89,9 @@ Use the included client script from your machine:
 ```bash
 # Send the knock sequence
 ./knock_client.sh <server-ip>
+
+# Custom sequence ports and knock delay
+./knock_client.sh <server-ip> -p 7000,8000,9000 -d 0.5
 
 # Knock and automatically SSH in afterwards
 ./knock_client.sh <server-ip> --ssh
