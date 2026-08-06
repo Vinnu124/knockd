@@ -77,9 +77,10 @@ static void print_usage(const char *progname)
     printf("Usage: sudo %s [OPTIONS]\n", progname);
     printf("\n");
     printf("Options:\n");
-    printf("  -h, --help       Show this help message\n");
-    printf("  -f, --foreground Run in foreground (default)\n");
-    printf("  -v, --verbose    Enable debug logging\n");
+    printf("  -h, --help           Show this help message\n");
+    printf("  -f, --foreground     Run in foreground (default)\n");
+    printf("  -v, --verbose        Enable debug logging\n");
+    printf("  -c, --config <file>  Path to config file (default: /etc/knockd.conf)\n");
     printf("\n");
     printf("The daemon must be run as root (requires raw sockets + iptables).\n");
     printf("\n");
@@ -87,7 +88,8 @@ static void print_usage(const char *progname)
 
 int main(int argc, char *argv[])
 {
-    int verbose = 0;
+    int         verbose     = 0;
+    const char *config_file = "/etc/knockd.conf";  /* default path */
 
     /* ── Parse arguments ───────────────────────────────────────────── */
     for (int i = 1; i < argc; i++) {
@@ -98,6 +100,13 @@ int main(int argc, char *argv[])
             verbose = 1;
         } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--foreground") == 0) {
             /* Already the default */
+        } else if (strcmp(argv[i], "-c") == 0 || strcmp(argv[i], "--config") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "Error: %s requires a file path argument.\n", argv[i]);
+                print_usage(argv[0]);
+                return 1;
+            }
+            config_file = argv[++i];
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             print_usage(argv[0]);
@@ -120,7 +129,7 @@ int main(int argc, char *argv[])
     }
 
     /* ── Load Configuration ────────────────────────────────────────── */
-    config_load("/etc/knockd.conf");
+    config_load(config_file);
 
     /* ── Print banner ──────────────────────────────────────────────── */
     print_banner();
