@@ -65,6 +65,11 @@ log_level = 2
 sudo systemctl enable knockd
 sudo systemctl start knockd
 ```
+Or run directly with a custom config file (useful for local testing without installing):
+```bash
+sudo ./knockd -c ./knockd.conf.example
+sudo ./knockd -c ./knockd.conf.example -v   # verbose logging
+```
 
 ---
 
