@@ -6,15 +6,41 @@
 #include <string.h>
 
 /* ── Default Values ──────────────────────────────────────────────────── */
+/*
+ * Fallback values, used when the config file is missing or unreadable,
+ * omits a key, or supplies a value that config_validate() rejects as out
+ * of range. Defined in one place so the initializers below, the reset
+ * logic in config_validate(), and knockd.conf.example never drift apart.
+ */
+#define DEFAULT_SEQUENCE_INIT   { 7000, 8000, 9000 }
+#define DEFAULT_PROTECTED_PORT  22
+#define DEFAULT_ACCESS_TIMEOUT  30
+#define DEFAULT_KNOCK_WINDOW    15
+#define DEFAULT_MAX_CLIENTS     64
+#define DEFAULT_LOG_LEVEL       2
 
-int KNOCK_SEQ_LEN = 3;
-uint16_t KNOCK_SEQUENCE[MAX_KNOCK_SEQ_LEN] = { 7000, 8000, 9000 };
+static const uint16_t DEFAULT_SEQUENCE[] = DEFAULT_SEQUENCE_INIT;
+#define DEFAULT_SEQ_LEN \
+    ((int)(sizeof(DEFAULT_SEQUENCE) / sizeof(DEFAULT_SEQUENCE[0])))
 
-int PROTECTED_PORT = 22;
-int ACCESS_TIMEOUT = 30;
-int KNOCK_WINDOW   = 15;
-int MAX_CLIENTS    = 64;
-int LOG_LEVEL      = 2;
+int      KNOCK_SEQ_LEN                     = DEFAULT_SEQ_LEN;
+uint16_t KNOCK_SEQUENCE[MAX_KNOCK_SEQ_LEN] = DEFAULT_SEQUENCE_INIT;
+
+int PROTECTED_PORT = DEFAULT_PROTECTED_PORT;
+int ACCESS_TIMEOUT = DEFAULT_ACCESS_TIMEOUT;
+int KNOCK_WINDOW   = DEFAULT_KNOCK_WINDOW;
+int MAX_CLIENTS    = DEFAULT_MAX_CLIENTS;
+int LOG_LEVEL      = DEFAULT_LOG_LEVEL;
+
+/*
+ * Restore the knock sequence (and its length) to the compiled-in default.
+ * Called by config_validate() whenever the configured sequence is unusable.
+ */
+static void reset_sequence_to_default(void)
+{
+    memcpy(KNOCK_SEQUENCE, DEFAULT_SEQUENCE, sizeof(DEFAULT_SEQUENCE));
+    KNOCK_SEQ_LEN = DEFAULT_SEQ_LEN;
+}
 
 /*
  * Parse a comma-separated list of ports.
@@ -47,10 +73,7 @@ static void config_validate(void)
     if (KNOCK_SEQ_LEN < 2) {
         log_warn("Config: 'sequence' must have at least 2 ports (got %d) "
                  "— resetting to defaults (7000,8000,9000)", KNOCK_SEQ_LEN);
-        KNOCK_SEQ_LEN       = 3;
-        KNOCK_SEQUENCE[0]   = 7000;
-        KNOCK_SEQUENCE[1]   = 8000;
-        KNOCK_SEQUENCE[2]   = 9000;
+        reset_sequence_to_default();
         ok = 0;
     } else {
         /* Validate each port in the sequence */
@@ -59,10 +82,7 @@ static void config_validate(void)
                 log_warn("Config: knock sequence port[%d]=%u is invalid "
                          "(must be 1–65535) — resetting to defaults",
                          i, KNOCK_SEQUENCE[i]);
-                KNOCK_SEQ_LEN       = 3;
-                KNOCK_SEQUENCE[0]   = 7000;
-                KNOCK_SEQUENCE[1]   = 8000;
-                KNOCK_SEQUENCE[2]   = 9000;
+                reset_sequence_to_default();
                 ok = 0;
                 break;
             }
@@ -75,10 +95,7 @@ static void config_validate(void)
                     log_warn("Config: knock sequence has duplicate port %u "
                              "at positions %d and %d — resetting to defaults",
                              KNOCK_SEQUENCE[i], i, j);
-                    KNOCK_SEQ_LEN       = 3;
-                    KNOCK_SEQUENCE[0]   = 7000;
-                    KNOCK_SEQUENCE[1]   = 8000;
-                    KNOCK_SEQUENCE[2]   = 9000;
+                    reset_sequence_to_default();
                     ok = 0;
                     break;
                 }
@@ -90,7 +107,7 @@ static void config_validate(void)
     if (PROTECTED_PORT < 1 || PROTECTED_PORT > 65535) {
         log_warn("Config: 'port' value %d is out of range (1–65535) "
                  "— resetting to default (22)", PROTECTED_PORT);
-        PROTECTED_PORT = 22;
+        PROTECTED_PORT = DEFAULT_PROTECTED_PORT;
         ok = 0;
     }
 
@@ -108,7 +125,7 @@ static void config_validate(void)
     if (ACCESS_TIMEOUT <= 0) {
         log_warn("Config: 'timeout' must be > 0 (got %d) "
                  "— resetting to default (30s)", ACCESS_TIMEOUT);
-        ACCESS_TIMEOUT = 30;
+        ACCESS_TIMEOUT = DEFAULT_ACCESS_TIMEOUT;
         ok = 0;
     } else if (ACCESS_TIMEOUT > 3600) {
         log_warn("Config: 'timeout' of %ds is very large (max sensible is "
@@ -120,7 +137,7 @@ static void config_validate(void)
     if (KNOCK_WINDOW <= 0) {
         log_warn("Config: 'window' must be > 0 (got %d) "
                  "— resetting to default (15s)", KNOCK_WINDOW);
-        KNOCK_WINDOW = 15;
+        KNOCK_WINDOW = DEFAULT_KNOCK_WINDOW;
         ok = 0;
     } else if (KNOCK_WINDOW > ACCESS_TIMEOUT) {
         log_warn("Config: 'window' (%ds) is larger than 'timeout' (%ds) "
@@ -132,12 +149,12 @@ static void config_validate(void)
     if (MAX_CLIENTS <= 0) {
         log_warn("Config: 'max_clients' must be > 0 (got %d) "
                  "— resetting to default (64)", MAX_CLIENTS);
-        MAX_CLIENTS = 64;
+        MAX_CLIENTS = DEFAULT_MAX_CLIENTS;
         ok = 0;
     } else if (MAX_CLIENTS > 65536) {
         log_warn("Config: 'max_clients' of %d is unreasonably large "
                  "— resetting to default (64)", MAX_CLIENTS);
-        MAX_CLIENTS = 64;
+        MAX_CLIENTS = DEFAULT_MAX_CLIENTS;
         ok = 0;
     }
 
@@ -145,7 +162,7 @@ static void config_validate(void)
     if (LOG_LEVEL < 0 || LOG_LEVEL > 3) {
         log_warn("Config: 'log_level' must be 0–3 (got %d) "
                  "— resetting to default (2 = INFO)", LOG_LEVEL);
-        LOG_LEVEL = 2;
+        LOG_LEVEL = DEFAULT_LOG_LEVEL;
         ok = 0;
     }
 
