@@ -124,12 +124,18 @@ int main(int argc, char *argv[])
     /* ── Initialize logger ─────────────────────────────────────────── */
     logger_init(0);
 
-    if (verbose) {
-        log_info("Verbose/debug logging enabled");
-    }
-
     /* ── Load Configuration ────────────────────────────────────────── */
     config_load(config_file);
+
+    /*
+     * A -v/--verbose flag on the command line overrides log_level from
+     * the config file, so debugging a running daemon doesn't require a
+     * config edit and restart. Applied after config_load() so it wins.
+     */
+    if (verbose) {
+        LOG_LEVEL = LEVEL_DEBUG;
+        log_info("Verbose/debug logging enabled (-v overrides config log_level)");
+    }
 
     /* ── Print banner ──────────────────────────────────────────────── */
     print_banner();
