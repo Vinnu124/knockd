@@ -6,8 +6,8 @@
  * the main packet-processing pipeline.
  *
  * The daemon runs two threads in parallel:
- *   - A sniffer thread captures TCP SYN packets and pushes them
- *     into a shared ring buffer.
+ *   - A sniffer thread captures TCP SYN and UDP packets and pushes
+ *     them into a shared ring buffer.
  *   - A processor thread drains the queue, runs the knock state
  *     machine, and triggers firewall operations.
  *
@@ -47,21 +47,44 @@ static void signal_handler(int signum)
 }
 
 /*
+ * Format the configured knock sequence into buf as "7000 → 8000 → 9000".
+ * Always NUL-terminates and truncates rather than overflowing. Returns buf
+ * so it can be passed straight to a printf-style call.
+ */
+static const char *format_knock_sequence(char *buf, size_t buflen)
+{
+    size_t off = 0;
+
+    if (buflen == 0) {
+        return buf;
+    }
+    buf[0] = '\0';
+
+    for (int i = 0; i < KNOCK_SEQ_LEN; i++) {
+        int n = snprintf(buf + off, buflen - off, "%s%u",
+                         (i == 0) ? "" : " → ", KNOCK_SEQUENCE[i]);
+        if (n < 0 || (size_t)n >= buflen - off) {
+            break;  /* truncated — stop cleanly */
+        }
+        off += (size_t)n;
+    }
+    return buf;
+}
+
+/*
  * Print a banner showing the daemon configuration.
  */
 static void print_banner(void)
 {
+    char seqbuf[128];
+
     printf("\n");
     printf("╔══════════════════════════════════════════════════════╗\n");
     printf("║          PORT KNOCKING DAEMON (knockd)               ║\n");
     printf("╠══════════════════════════════════════════════════════╣\n");
     printf("║                                                      ║\n");
-    printf("║  Knock sequence:  ");
-    for (int i = 0; i < KNOCK_SEQ_LEN; i++) {
-        printf("%u", KNOCK_SEQUENCE[i]);
-        if (i < KNOCK_SEQ_LEN - 1) printf(" → ");
-    }
-    printf("\n");
+    printf("║  Knock sequence:  %s\n",
+           format_knock_sequence(seqbuf, sizeof(seqbuf)));
     printf("║  Protected port:  %d\n", PROTECTED_PORT);
     printf("║  Access timeout:  %d seconds\n", ACCESS_TIMEOUT);
     printf("║  Knock window:    %d seconds\n", KNOCK_WINDOW);
@@ -164,10 +187,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    char seqbuf[128];
     log_info("Listening for knock sequences...");
-    log_info("Send TCP SYN to ports %u → %u → %u to open port %d",
-             KNOCK_SEQUENCE[0], KNOCK_SEQUENCE[1], KNOCK_SEQUENCE[2],
-             PROTECTED_PORT);
+    log_info("Send a TCP SYN or UDP packet to ports %s to open port %d",
+             format_knock_sequence(seqbuf, sizeof(seqbuf)), PROTECTED_PORT);
 
     /* ── Parallel pipeline: sniffer + processor ────────────────────── */
 
