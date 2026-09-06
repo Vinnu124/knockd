@@ -237,18 +237,17 @@ int main(int argc, char *argv[])
                                  "in %ds)",
                                  PROTECTED_PORT, ip_str, ACCESS_TIMEOUT);
 
-                        /* Run firewall open as a task so multiple
-                         * completions don't block each other */
-                        uint32_t task_ip = evt.src_ip;
-                        #pragma omp task firstprivate(task_ip)
-                        {
-                            if (firewall_open(task_ip) < 0) {
-                                char tstr[INET_ADDRSTRLEN];
-                                inet_ntop(AF_INET, &task_ip, tstr,
-                                          sizeof(tstr));
-                                log_error("Failed to open firewall for %s",
-                                          tstr);
-                            }
+                        /*
+                         * Open the port synchronously. iptables returns in
+                         * a few ms and completions are rare, so there is
+                         * nothing to gain from offloading — and an OpenMP
+                         * task generated inside this section is not
+                         * guaranteed to run until the next taskwait, which
+                         * only happens at shutdown.
+                         */
+                        if (firewall_open(evt.src_ip) < 0) {
+                            log_error("Failed to open firewall for %s",
+                                      ip_str);
                         }
                     }
                 }
@@ -263,8 +262,6 @@ int main(int argc, char *argv[])
                 /* Brief sleep to avoid busy-waiting on an empty queue */
                 usleep(10000);
             }
-
-            #pragma omp taskwait
         }
     }
 
