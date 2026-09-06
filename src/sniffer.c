@@ -100,7 +100,14 @@ int sniffer_next_knock(int sock_fd, uint32_t *src_ip, uint16_t *dst_port)
         }
 
         struct iphdr *iph = (struct iphdr *)(buffer + ip_offset);
-        size_t ip_hdr_len = iph->ihl * 4;
+        size_t ip_hdr_len = (size_t)iph->ihl * 4;
+
+        /* A well-formed IPv4 header is 20–60 bytes. Reject anything
+         * shorter so the L4 offset below can't land inside the IP
+         * header (or before it). */
+        if (ip_hdr_len < sizeof(struct iphdr)) {
+            continue;
+        }
 
         /* ── Layer 4: TCP or UDP Header ─────────────────────────────── */
         uint16_t dport = 0;
