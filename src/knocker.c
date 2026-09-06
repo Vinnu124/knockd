@@ -63,24 +63,34 @@ static knock_client_t *find_client(uint32_t ip)
 /* Find a free slot, or evict the oldest stale entry */
 static knock_client_t *alloc_client(void)
 {
+    knock_client_t *slot = NULL;
+
     /* First pass: find an empty slot */
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i].active) {
-            return &clients[i];
+            slot = &clients[i];
+            break;
         }
     }
 
     /* Table full — evict the entry with the oldest last_knock */
-    knock_client_t *oldest = &clients[0];
-    for (int i = 1; i < MAX_CLIENTS; i++) {
-        if (clients[i].last_knock < oldest->last_knock) {
-            oldest = &clients[i];
+    if (slot == NULL) {
+        slot = &clients[0];
+        for (int i = 1; i < MAX_CLIENTS; i++) {
+            if (clients[i].last_knock < slot->last_knock) {
+                slot = &clients[i];
+            }
         }
+        log_warn("Client table full, evicting %s", ip_to_str(slot->ip));
     }
 
-    log_warn("Client table full, evicting %s", ip_to_str(oldest->ip));
-    oldest->active = false;
-    return oldest;
+    /*
+     * Hand back a zeroed slot. A reused entry must not inherit the previous
+     * client's current_step, last_knock or last_port — a stale last_port in
+     * particular can make the dedup check swallow a legitimate first knock.
+     */
+    memset(slot, 0, sizeof(*slot));
+    return slot;
 }
 
 /* ── Public API ────────────────────────────────────────────────────── */
