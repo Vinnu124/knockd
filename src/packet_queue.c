@@ -34,13 +34,13 @@ void pktqueue_init(void)
     omp_init_lock(&queue_lock);
     head = tail = count = 0;
     memset(ring, 0, sizeof(ring));
-    log_info("Packet queue initialized (capacity: %d)", QUEUE_CAPACITY);
+    log_debug("Packet queue initialized (capacity: %d)", QUEUE_CAPACITY);
 }
 
 void pktqueue_destroy(void)
 {
     omp_destroy_lock(&queue_lock);
-    log_info("Packet queue destroyed");
+    log_debug("Packet queue destroyed");
 }
 
 int pktqueue_push(const knock_event_t *event)

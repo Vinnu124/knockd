@@ -72,27 +72,26 @@ static const char *format_knock_sequence(char *buf, size_t buflen)
 }
 
 /*
- * Print a banner showing the daemon configuration.
+ * Print a startup banner summarizing the active configuration.
+ * Goes to stderr so it shares a stream with the log output (matters when
+ * redirecting, or reading the daemon's output back from journald).
  */
 static void print_banner(void)
 {
     char seqbuf[128];
 
-    printf("\n");
-    printf("╔══════════════════════════════════════════════════════╗\n");
-    printf("║          PORT KNOCKING DAEMON (knockd)               ║\n");
-    printf("╠══════════════════════════════════════════════════════╣\n");
-    printf("║                                                      ║\n");
-    printf("║  Knock sequence:  %s\n",
-           format_knock_sequence(seqbuf, sizeof(seqbuf)));
-    printf("║  Protected port:  %d\n", PROTECTED_PORT);
-    printf("║  Access timeout:  %d seconds\n", ACCESS_TIMEOUT);
-    printf("║  Knock window:    %d seconds\n", KNOCK_WINDOW);
-    printf("║  Max clients:     %d\n", MAX_CLIENTS);
-    printf("║  OpenMP threads:  %d\n", omp_get_max_threads());
-    printf("║                                                      ║\n");
-    printf("╚══════════════════════════════════════════════════════╝\n");
-    printf("\n");
+    fprintf(stderr,
+        "\n"
+        "  knockd — port knocking daemon\n"
+        "  ─────────────────────────────\n"
+        "\n"
+        "    knock sequence   %s\n"
+        "    protected port   %d\n"
+        "    access window    %ds open, %ds between knocks\n"
+        "    client table     %d slots\n"
+        "\n",
+        format_knock_sequence(seqbuf, sizeof(seqbuf)),
+        PROTECTED_PORT, ACCESS_TIMEOUT, KNOCK_WINDOW, MAX_CLIENTS);
 }
 
 static void print_usage(const char *progname)
@@ -173,7 +172,7 @@ int main(int argc, char *argv[])
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    log_info("Signal handlers installed (Ctrl+C or kill to stop)");
+    log_debug("Signal handlers installed (SIGINT/SIGTERM stop the daemon)");
 
     /* ── Initialize components ─────────────────────────────────────── */
     knocker_init();
@@ -188,8 +187,7 @@ int main(int argc, char *argv[])
     }
 
     char seqbuf[128];
-    log_info("Listening for knock sequences...");
-    log_info("Send a TCP SYN or UDP packet to ports %s to open port %d",
+    log_info("Listening — knock %s (TCP SYN or UDP) to open port %d",
              format_knock_sequence(seqbuf, sizeof(seqbuf)), PROTECTED_PORT);
 
     /* ── Parallel pipeline: sniffer + processor ────────────────────── */

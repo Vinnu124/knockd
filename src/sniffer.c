@@ -61,7 +61,7 @@ int sniffer_init(void)
         return -1;
     }
 
-    log_info("Raw socket created (fd=%d)", sock);
+    log_debug("Raw socket created (fd=%d)", sock);
     return sock;
 }
 
@@ -156,6 +156,6 @@ void sniffer_close(int sock_fd)
 {
     if (sock_fd >= 0) {
         close(sock_fd);
-        log_info("Raw socket closed");
+        log_debug("Raw socket closed");
     }
 }

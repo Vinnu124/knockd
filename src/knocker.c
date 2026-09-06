@@ -92,7 +92,7 @@ void knocker_init(void)
         log_error("Failed to allocate memory for knocker clients");
         exit(1);
     }
-    log_info("Knock state machine initialized (capacity: %d clients)", MAX_CLIENTS);
+    log_debug("Knock state machine initialized (capacity: %d clients)", MAX_CLIENTS);
 }
 
 knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
