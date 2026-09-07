@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make libpcap-dev
+          sudo apt-get install -y gcc make
 
       - name: Build
         run: make
@@ -40,7 +40,16 @@ jobs:
           files: knockd-*.tar.gz
           body: |
             ## Installation
-            
+
+            Prebuilt for Linux x86_64. Requires root (raw sockets + iptables).
+
+            ```bash
             tar -xzf knockd-${{ github.ref_name }}-linux-x86_64.tar.gz
-            sudo make install
-            sudo systemctl start knockd
+            sudo install -m 755 knockd /usr/local/bin/knockd
+            sudo install -m 644 knockd.conf.example /etc/knockd.conf
+            sudo install -m 644 knockd.service /etc/systemd/system/knockd.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable --now knockd
+            ```
+
+            Set up the baseline firewall rules first — see the README.
