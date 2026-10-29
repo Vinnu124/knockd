@@ -33,6 +33,8 @@ pass() { printf '  ok    %s\n' "$*"; }
 fail() { printf '  FAIL  %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
 info() { printf '%s\n' "$*"; }
 
+# Invoked by the EXIT trap below, which shellcheck cannot follow.
+# shellcheck disable=SC2329
 cleanup() {
     local status=$?
 
@@ -69,6 +71,9 @@ wait_until() {
     return 1
 }
 
+# Passed to wait_until by name rather than called directly, so shellcheck
+# does not see the call site.
+# shellcheck disable=SC2329
 chain_exists()   { "$IPTABLES" -S "$CHAIN"; }
 jump_installed() { "$IPTABLES" -S INPUT | grep -q -- "-j $CHAIN"; }
 
