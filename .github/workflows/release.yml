@@ -3,53 +3,74 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'  
+      - 'v*'
 
 jobs:
   build-and-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04   # pinned: the binary needs this glibc or newer
     permissions:
       contents: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so `git describe` can find the version tag
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc make
+          sudo apt-get install -y gcc make netcat-openbsd iptables
 
-      - name: Build
-        run: make
+      - name: Build with warnings as errors
+        run: make strict
 
-      - name: Package release assets
+      - name: Unit tests
+        run: make test
+
+      - name: Integration test
+        run: sudo tests/integration.sh
+
+      - name: Rebuild for release
         run: |
-          VERSION=${GITHUB_REF_NAME}
-          mkdir -p release
-          cp knockd release/
-          cp knockd.conf.example release/
-          cp knockd.service release/
-          cp knock_client.sh release/
-          tar -czf knockd-${VERSION}-linux-x86_64.tar.gz -C release .
+          make clean
+          make
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          mkdir -p "knockd-${VERSION}"
+          cp knockd knockd.conf.example knockd.service knock_client.sh \
+             README.md "knockd-${VERSION}/"
+          tar -czf "knockd-${VERSION}-linux-x86_64.tar.gz" "knockd-${VERSION}"
+          sha256sum "knockd-${VERSION}-linux-x86_64.tar.gz" \
+            > "knockd-${VERSION}-linux-x86_64.tar.gz.sha256"
+          ./knockd --version
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: knockd-*.tar.gz
+          files: |
+            knockd-*.tar.gz
+            knockd-*.tar.gz.sha256
           body: |
-            ## Installation
-
-            Prebuilt for Linux x86_64. Requires root (raw sockets + iptables).
+            Linux x86_64. Needs root for the raw capture socket and for
+            iptables. Built against glibc 2.35 (Ubuntu 22.04), so it runs
+            on that or newer; build from source for anything older.
 
             ```bash
             tar -xzf knockd-${{ github.ref_name }}-linux-x86_64.tar.gz
+            cd knockd-${{ github.ref_name }}
+            sha256sum -c ../knockd-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
+
             sudo install -m 755 knockd /usr/local/bin/knockd
-            sudo install -m 644 knockd.conf.example /etc/knockd.conf
+            sudo install -m 600 knockd.conf.example /etc/knockd.conf
             sudo install -m 644 knockd.service /etc/systemd/system/knockd.service
             sudo systemctl daemon-reload
-            sudo systemctl enable --now knockd
             ```
 
-            Set up the baseline firewall rules first — see the README.
+            Then **edit the knock sequence in /etc/knockd.conf** — the
+            default is the one published in the README — add the firewall
+            rule that blocks the protected port, and start the daemon. See
+            the README for both steps.

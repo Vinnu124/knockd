@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: build
 
 on:
   push:
@@ -8,12 +8,61 @@ on:
 
 jobs:
   build:
-
+    name: build and unit test (${{ matrix.cc }})
     runs-on: ubuntu-latest
-
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
     steps:
-    - uses: actions/checkout@v4
-    - name: make
-      run: make
-    - name: smoke test
-      run: ./knockd --help
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # so `git describe` can find the version tag
+
+      - name: Build with warnings as errors
+        run: make strict CC=${{ matrix.cc }}
+
+      - name: Smoke test
+        run: ./knockd --help && ./knockd --version
+
+      - name: Unit tests
+        run: make test CC=${{ matrix.cc }}
+
+      - name: Unit tests under ASan and UBSan
+        run: |
+          make clean
+          make test CC=${{ matrix.cc }} \
+            CFLAGS="-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer" \
+            LDFLAGS="-fsanitize=address,undefined" \
+            HARDENING="-fstack-protector-strong -fPIE"
+
+  integration:
+    name: end-to-end against iptables
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y netcat-openbsd iptables
+
+      - name: Build
+        run: make
+
+      - name: Run the integration test
+        run: sudo tests/integration.sh
+
+  lint:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+      - name: Lint the shell scripts
+        run: shellcheck knock_client.sh tests/integration.sh
