@@ -1,19 +1,46 @@
 [Unit]
-Description=Port Knocking Daemon (knockd)
+Description=knockd port knocking daemon
+Documentation=https://github.com/Vinnu124/knockd
 After=network.target
+# Without a config file knockd would fall back to the knock sequence
+# published in the README, so refuse to start rather than do that.
+ConditionPathExists=/etc/knockd.conf
 
 [Service]
 Type=simple
-# Requires root for raw sockets and iptables
-User=root
 ExecStart=/usr/local/bin/knockd
 Restart=on-failure
 RestartSec=5s
 
-# Security hardening
+# knockd needs CAP_NET_RAW for the capture socket and CAP_NET_ADMIN for
+# iptables. It runs as root because iptables does, but everything else the
+# kernel would otherwise allow root is taken away.
+User=root
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_PACKET AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+# knockd reads one config file and writes nothing. ProtectSystem=full is
+# used rather than strict because iptables locks /run/xtables.lock, which
+# strict would make read-only.
 ProtectSystem=full
 ProtectHome=yes
-NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectProc=invisible
+PrivateTmp=yes
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

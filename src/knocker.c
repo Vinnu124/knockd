@@ -1,55 +1,66 @@
 /*
  * knocker.c — Per-IP knock sequence state machine.
  *
- * Maintains a fixed-size table of client IPs. For each incoming
- * SYN on a knock port, checks whether the client is progressing
- * through the secret sequence in order.
- *
- * Key design:
- *   - Fixed-size array (no malloc) — bounded memory, simple logic
- *   - Thread-safe: shared table access is serialized
- *   - Stale entries expire after KNOCK_WINDOW seconds
- *   - Wrong-order knocks immediately reset the client's progress
+ * A fixed-size table of client entries, one per address that is partway
+ * through the sequence. Entries are small and bounded, and the table is
+ * guarded by a single mutex: contention is irrelevant here because only
+ * the processor thread calls in, and holding the lock across the logging
+ * keeps the log in the same order as the state changes it describes.
  */
 
 #include "knocker.h"
 #include "config.h"
 #include "logger.h"
 
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <arpa/inet.h>
-#include <stdbool.h>
-#include <omp.h>
-#include <stdlib.h>
-/* ── Per-client tracking entry ─────────────────────────────────────── */
-/* Dedup window: ignore a repeated knock on the same port within this
- * many seconds. Prevents nmap's duplicate SYNs from resetting progress. */
-#define KNOCK_DEDUP_WINDOW 5   /* kernel TCP SYN retransmits can arrive up to ~3s later */
+
+/*
+ * Ignore a repeat of the port we just accepted, for this many seconds.
+ *
+ * The kernel retransmits an unanswered SYN after 1–3 seconds. That
+ * retransmit arrives as a second knock on the same port, which without
+ * this would count as an out-of-order knock and throw away the client's
+ * progress. Sequences with a repeated port are rejected by
+ * config_validate(), so this can never swallow a legitimate step.
+ */
+#define KNOCK_DEDUP_WINDOW 5
 
 typedef struct {
-    uint32_t    ip;             /* Client IP (network byte order)     */
-    int         current_step;   /* Steps completed (0 = no progress)  */
-    time_t      last_knock;     /* Timestamp of last valid knock      */
-    uint16_t    last_port;      /* Port of the last accepted knock     */
-    bool        active;         /* Is this slot in use?               */
+    uint32_t ip;            /* client IP, network byte order        */
+    int      current_step;  /* steps completed so far               */
+    time_t   last_knock;    /* when the last knock was accepted     */
+    uint16_t last_port;     /* which port that was, for dedup       */
+    bool     active;        /* is this slot in use?                 */
 } knock_client_t;
 
-/* Fixed-size client table */
-static knock_client_t *clients = NULL;
+static knock_client_t *clients     = NULL;
+static pthread_mutex_t table_lock  = PTHREAD_MUTEX_INITIALIZER;
 
-/* ── Helpers ───────────────────────────────────────────────────────── */
+/* ── Helpers ─────────────────────────────────────────────────────────── */
 
-/* Format an IP for logging (thread-local buffer to avoid races) */
+/*
+ * Format an IP for a log line.
+ *
+ * The buffer is thread-local, so two threads cannot collide — but a single
+ * log call must not use this twice, because the second call overwrites the
+ * first result before printf sees either.
+ */
 static const char *ip_to_str(uint32_t ip)
 {
-    static char buf[INET_ADDRSTRLEN];
-    #pragma omp threadprivate(buf)
-    inet_ntop(AF_INET, &ip, buf, sizeof(buf));
+    static _Thread_local char buf[INET_ADDRSTRLEN];
+
+    if (inet_ntop(AF_INET, &ip, buf, sizeof(buf)) == NULL) {
+        return "?";
+    }
     return buf;
 }
 
-/* Find an existing entry for this IP, or return NULL */
+/* Find the entry for this IP, or NULL. Caller holds table_lock. */
 static knock_client_t *find_client(uint32_t ip)
 {
     for (int i = 0; i < MAX_CLIENTS; i++) {
@@ -60,157 +71,183 @@ static knock_client_t *find_client(uint32_t ip)
     return NULL;
 }
 
-/* Find a free slot, or evict the oldest stale entry */
+/*
+ * Claim a zeroed slot for a new client. Caller holds table_lock.
+ *
+ * A free slot is used if there is one. If the table is full, the oldest
+ * entry is reused, but only once it is past KNOCK_WINDOW and therefore
+ * worthless anyway: source addresses are trivially spoofable, so a flood
+ * of first-port knocks must not be able to evict a real client that is
+ * halfway through the sequence.
+ *
+ * Returns NULL if every entry is a live sequence.
+ */
 static knock_client_t *alloc_client(void)
 {
-    knock_client_t *slot = NULL;
+    knock_client_t *oldest = NULL;
+    time_t          now    = time(NULL);
 
-    /* First pass: find an empty slot */
     for (int i = 0; i < MAX_CLIENTS; i++) {
         if (!clients[i].active) {
-            slot = &clients[i];
-            break;
+            memset(&clients[i], 0, sizeof(clients[i]));
+            return &clients[i];
+        }
+        if (oldest == NULL || clients[i].last_knock < oldest->last_knock) {
+            oldest = &clients[i];
         }
     }
 
-    /* Table full — evict the entry with the oldest last_knock */
-    if (slot == NULL) {
-        slot = &clients[0];
-        for (int i = 1; i < MAX_CLIENTS; i++) {
-            if (clients[i].last_knock < slot->last_knock) {
-                slot = &clients[i];
-            }
+    if (oldest == NULL || (now - oldest->last_knock) <= KNOCK_WINDOW) {
+        return NULL;
+    }
+
+    log_debug("Client table full — reusing the expired entry for %s",
+              ip_to_str(oldest->ip));
+    memset(oldest, 0, sizeof(*oldest));
+    return oldest;
+}
+
+/*
+ * The state machine itself. Caller holds table_lock.
+ */
+static knock_result_t process_locked(uint32_t src_ip, uint16_t dst_port)
+{
+    time_t          now = time(NULL);
+    knock_client_t *c   = find_client(src_ip);
+
+    if (c == NULL) {
+        /*
+         * An address we are not tracking. Only the first port of the
+         * sequence starts an entry — anything else is background scan
+         * noise and is not worth a table slot.
+         */
+        if (dst_port != KNOCK_SEQUENCE[0]) {
+            log_debug("%s knocked port %u, which does not start the "
+                      "sequence — ignored", ip_to_str(src_ip), dst_port);
+            return KNOCK_RESET;
         }
-        log_warn("Client table full, evicting %s", ip_to_str(slot->ip));
+
+        c = alloc_client();
+        if (c == NULL) {
+            log_warn("Client table is full of sequences in progress "
+                     "— ignoring the knock from %s", ip_to_str(src_ip));
+            return KNOCK_RESET;
+        }
+        c->ip     = src_ip;
+        c->active = true;
+        /*
+         * last_port stays 0, which config_validate() guarantees is not in
+         * the sequence, so the dedup check below cannot swallow this
+         * client's first knock.
+         */
+    }
+
+    if (dst_port == c->last_port &&
+        (now - c->last_knock) <= KNOCK_DEDUP_WINDOW) {
+        log_debug("%s repeated port %u within %ds — ignored as a "
+                  "retransmit", ip_to_str(src_ip), dst_port,
+                  KNOCK_DEDUP_WINDOW);
+        return KNOCK_IN_PROGRESS;
+    }
+
+    if (c->current_step > 0 && (now - c->last_knock) > KNOCK_WINDOW) {
+        log_info("%s left more than %ds between knocks — starting over",
+                 ip_to_str(src_ip), KNOCK_WINDOW);
+        c->current_step = 0;
+    }
+
+    if (dst_port == KNOCK_SEQUENCE[c->current_step]) {
+        c->current_step++;
+        c->last_knock = now;
+        c->last_port  = dst_port;
+
+        if (c->current_step >= KNOCK_SEQ_LEN) {
+            /* Release the slot: another grant needs the whole sequence
+             * again. */
+            c->active = false;
+            return KNOCK_COMPLETE;
+        }
+
+        /* The step number is safe to log; the port is the secret. */
+        log_info("%s is at step %d of %d",
+                 ip_to_str(src_ip), c->current_step, KNOCK_SEQ_LEN);
+        return KNOCK_IN_PROGRESS;
     }
 
     /*
-     * Hand back a zeroed slot. A reused entry must not inherit the previous
-     * client's current_step, last_knock or last_port — a stale last_port in
-     * particular can make the dedup check swallow a legitimate first knock.
+     * Wrong port. If it is the first port of the sequence, treat it as a
+     * fresh attempt rather than a failure, so a client that lost its place
+     * can simply knock again.
+     *
+     * last_port has to be updated here too. Leaving it pointing at the
+     * previous step's port would make the dedup check above discard the
+     * client's next legitimate knock, and the sequence would then fail on
+     * the step after that.
      */
-    memset(slot, 0, sizeof(*slot));
-    return slot;
+    if (dst_port == KNOCK_SEQUENCE[0]) {
+        c->current_step = 1;
+        c->last_knock   = now;
+        c->last_port    = dst_port;
+        log_debug("%s knocked out of order — restarted at step 1 of %d",
+                  ip_to_str(src_ip), KNOCK_SEQ_LEN);
+        return KNOCK_IN_PROGRESS;
+    }
+
+    log_debug("%s knocked port %u out of order — progress discarded",
+              ip_to_str(src_ip), dst_port);
+    c->active = false;
+    return KNOCK_RESET;
 }
 
-/* ── Public API ────────────────────────────────────────────────────── */
+/* ── Public API ──────────────────────────────────────────────────────── */
 
-void knocker_init(void)
+int knocker_init(void)
 {
-    clients = calloc(MAX_CLIENTS, sizeof(knock_client_t));
-    if (!clients) {
-        log_error("Failed to allocate memory for knocker clients");
-        exit(1);
+    clients = calloc((size_t)MAX_CLIENTS, sizeof(*clients));
+    if (clients == NULL) {
+        log_error("Could not allocate a client table for %d clients",
+                  MAX_CLIENTS);
+        return -1;
     }
-    log_debug("Knock state machine initialized (capacity: %d clients)", MAX_CLIENTS);
+
+    log_debug("Knock state machine ready (%d client slots)", MAX_CLIENTS);
+    return 0;
+}
+
+void knocker_shutdown(void)
+{
+    free(clients);
+    clients = NULL;
 }
 
 knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port)
 {
     knock_result_t result;
 
-    /* Serialize access to the shared client table */
-    #pragma omp critical(knocker_table)
-    {
-        time_t now = time(NULL);
-
-        /* Find or create entry for this IP */
-        knock_client_t *c = find_client(src_ip);
-
-        if (c == NULL) {
-            /* New IP — only accept if it's knocking the FIRST port */
-            if (dst_port != KNOCK_SEQUENCE[0]) {
-                log_debug("%s knocked port %u (not first port %u) — ignored",
-                          ip_to_str(src_ip), dst_port, KNOCK_SEQUENCE[0]);
-                result = KNOCK_RESET;
-            } else {
-                /* Allocate a new entry */
-                c = alloc_client();
-                c->ip           = src_ip;
-                c->current_step = 0;
-                c->last_knock   = now;
-                c->active       = true;
-                /* Fall through to the port check below */
-                goto check_port;
-            }
-        } else {
-            check_port:
-            /* Deduplicate: ignore a repeat knock on the same port within
-             * KNOCK_DEDUP_WINDOW seconds (handles nmap duplicate SYNs). */
-            if (dst_port == c->last_port &&
-                (now - c->last_knock) <= KNOCK_DEDUP_WINDOW) {
-                log_debug("%s duplicate knock on port %u — ignored (dedup)",
-                          ip_to_str(src_ip), dst_port);
-                result = KNOCK_IN_PROGRESS;
-                goto done;
-            }
-
-            /* Check for timeout between knocks */
-            if (c->current_step > 0 && (now - c->last_knock) > KNOCK_WINDOW) {
-                log_info("%s timed out (%.0fs since last knock) — resetting",
-                         ip_to_str(src_ip), difftime(now, c->last_knock));
-                c->current_step = 0;
-            }
-
-            /* Check if this knock matches the expected port */
-            if (dst_port == KNOCK_SEQUENCE[c->current_step]) {
-                c->current_step++;
-                c->last_knock = now;
-                c->last_port  = dst_port;   /* record for dedup */
-
-                log_info("%s knocked port %u — step %d/%d",
-                         ip_to_str(src_ip), dst_port,
-                         c->current_step, KNOCK_SEQ_LEN);
-
-                if (c->current_step >= KNOCK_SEQ_LEN) {
-                    log_info("*** %s completed the knock sequence! ***",
-                             ip_to_str(src_ip));
-                    c->active = false;
-                    result = KNOCK_COMPLETE;
-                } else {
-                    result = KNOCK_IN_PROGRESS;
-                }
-            } else {
-                log_info("%s knocked port %u (expected %u) — resetting",
-                         ip_to_str(src_ip), dst_port,
-                         KNOCK_SEQUENCE[c->current_step]);
-
-                if (dst_port == KNOCK_SEQUENCE[0]) {
-                    c->current_step = 1;
-                    c->last_knock   = now;
-                    log_info("%s restarted sequence at step 1/%d",
-                             ip_to_str(src_ip), KNOCK_SEQ_LEN);
-                    result = KNOCK_IN_PROGRESS;
-                } else {
-                    c->active = false;
-                    result = KNOCK_RESET;
-                }
-            }
-        }
-        done:;
-    }
+    pthread_mutex_lock(&table_lock);
+    result = process_locked(src_ip, dst_port);
+    pthread_mutex_unlock(&table_lock);
 
     return result;
 }
 
 void knocker_cleanup_stale(void)
 {
-    time_t now = time(NULL);
-    int cleaned = 0;
+    time_t now     = time(NULL);
+    int    cleaned = 0;
 
-    /* Scan each slot independently */
-    #pragma omp parallel for reduction(+:cleaned) schedule(static)
+    pthread_mutex_lock(&table_lock);
     for (int i = 0; i < MAX_CLIENTS; i++) {
-        if (clients[i].active &&
-            (now - clients[i].last_knock) > KNOCK_WINDOW) {
-            log_debug("Cleaning stale entry for %s",
+        if (clients[i].active && (now - clients[i].last_knock) > KNOCK_WINDOW) {
+            log_debug("Dropping the stale entry for %s",
                       ip_to_str(clients[i].ip));
             clients[i].active = false;
             cleaned++;
         }
     }
+    pthread_mutex_unlock(&table_lock);
 
     if (cleaned > 0) {
-        log_debug("Cleaned %d stale client entries", cleaned);
+        log_debug("Dropped %d stale client entries", cleaned);
     }
 }

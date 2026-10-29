@@ -1,9 +1,11 @@
 /*
  * knocker.h — Per-IP knock sequence state machine.
  *
- * Tracks how far each client IP has progressed through the secret
- * knock sequence. Handles timeouts, wrong-port resets, and stale
- * entry cleanup.
+ * Tracks how far each source address has progressed through the sequence,
+ * and handles the ways progress can be lost: a wrong port, too long a gap
+ * between knocks, or the table filling up.
+ *
+ * All functions are safe to call from any thread.
  */
 
 #ifndef KNOCKER_H
@@ -11,35 +13,39 @@
 
 #include <stdint.h>
 
-/* Result of processing a knock attempt */
+/* Outcome of one knock. */
 typedef enum {
-    KNOCK_COMPLETE,      /* Sequence finished — open the port! */
-    KNOCK_IN_PROGRESS,   /* Correct knock — advanced to next step */
-    KNOCK_RESET          /* Wrong port or timeout — reset to step 0 */
+    KNOCK_COMPLETE,      /* sequence finished — grant access         */
+    KNOCK_IN_PROGRESS,   /* accepted, or ignored as a duplicate      */
+    KNOCK_RESET          /* wrong port, or not tracked at all        */
 } knock_result_t;
 
 /*
- * Initialize the client tracking table.
- * Must be called once before any knocker_process() calls.
+ * Allocate the client table. Call once, before starting any thread.
+ * Returns 0 on success, -1 if the table could not be allocated.
  */
-void knocker_init(void);
+int knocker_init(void);
 
 /*
- * Process a knock attempt from a client.
+ * Release the client table. Call once, after all threads have joined.
+ */
+void knocker_shutdown(void);
+
+/*
+ * Record one knock.
  *
- *   src_ip:   Client IP (network byte order)
- *   dst_port: Port the SYN was sent to (host byte order)
+ *   src_ip:   source IP, network byte order
+ *   dst_port: the port that was knocked, host byte order
  *
- * Returns:
- *   KNOCK_COMPLETE     — full sequence matched; trigger firewall open
- *   KNOCK_IN_PROGRESS  — correct step; waiting for next knock
- *   KNOCK_RESET        — wrong port or stale; progress reset
+ * Returns KNOCK_COMPLETE exactly once per completed sequence: the entry is
+ * released at that point, so the client must send the whole sequence again
+ * for another grant.
  */
 knock_result_t knocker_process(uint32_t src_ip, uint16_t dst_port);
 
 /*
- * Remove entries that haven't knocked within KNOCK_WINDOW seconds.
- * Call this periodically to prevent the table from filling up.
+ * Drop entries that have not knocked within KNOCK_WINDOW seconds. Call
+ * periodically so abandoned sequences do not hold table slots.
  */
 void knocker_cleanup_stale(void);
 

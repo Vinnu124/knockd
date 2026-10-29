@@ -1,0 +1,13 @@
+# Build output
+/build/
+/knockd
+*.o
+*.d
+
+# Release artifacts
+/knockd-*/
+/knockd-*.tar.gz
+/knockd-*.tar.gz.sha256
+
+# Local config, which holds the knock sequence — never commit it
+/knockd.conf

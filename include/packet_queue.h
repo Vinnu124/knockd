@@ -1,9 +1,12 @@
 /*
- * packet_queue.h — Thread-safe packet queue for producer-consumer pipeline.
+ * packet_queue.h — Bounded queue between the capture and processor threads.
  *
- * The sniffer thread pushes captured knock events into this queue,
- * and the processor thread(s) drain it. Uses OpenMP locks for
- * synchronization and a fixed-size ring buffer for bounded memory.
+ * The capture thread pushes knock events; the processor thread drains them.
+ * A fixed-size ring buffer keeps memory bounded and avoids a malloc per
+ * packet, and a condition variable lets the processor sleep until there is
+ * something to do.
+ *
+ * All functions are safe to call from any thread.
  */
 
 #ifndef PACKET_QUEUE_H
@@ -11,40 +14,48 @@
 
 #include <stdint.h>
 
-/* A single captured knock event */
+/* One captured knock. */
 typedef struct {
-    uint32_t src_ip;     /* Source IP (network byte order) */
-    uint16_t dst_port;   /* Destination port (host byte order) */
+    uint32_t src_ip;     /* source IP, network byte order      */
+    uint16_t dst_port;   /* destination port, host byte order  */
 } knock_event_t;
 
-/* Queue capacity — must be power of 2 for efficient modulo */
-#define QUEUE_CAPACITY  256
+/* Capacity. Must be a power of two — the ring masks instead of dividing. */
+#define QUEUE_CAPACITY 256
 
 /*
- * Initialize the packet queue. Must be called once at startup.
+ * Initialize the queue. Call once, before starting any thread.
  */
 void pktqueue_init(void);
 
 /*
- * Destroy the packet queue. Called at shutdown.
+ * Release the queue's resources. Call once, after all threads have joined.
  */
 void pktqueue_destroy(void);
 
 /*
- * Push a knock event into the queue (producer side).
- * Returns 0 on success, -1 if the queue is full (event is dropped).
+ * Push an event. Returns 0 on success, -1 if the queue was full and the
+ * event was dropped.
  */
 int pktqueue_push(const knock_event_t *event);
 
 /*
- * Pop a knock event from the queue (consumer side).
+ * Take an event if one is waiting, without blocking.
  * Returns 0 on success, -1 if the queue is empty.
  */
 int pktqueue_pop(knock_event_t *event);
 
 /*
- * Returns the current number of events in the queue.
+ * Take an event, waiting up to timeout_ms for one to arrive.
+ * Returns 0 on success, -1 on timeout or if the queue is shutting down.
  */
-int pktqueue_size(void);
+int pktqueue_wait(knock_event_t *event, int timeout_ms);
+
+/*
+ * Wake every waiter so it can notice that the daemon is stopping.
+ * Subsequent pktqueue_wait() calls return immediately once the queue is
+ * drained.
+ */
+void pktqueue_shutdown(void);
 
 #endif /* PACKET_QUEUE_H */

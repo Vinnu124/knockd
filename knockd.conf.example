@@ -1,25 +1,56 @@
-# Configuration file for knockd
-# Default location: /etc/knockd.conf
+# knockd configuration — default location /etc/knockd.conf
+#
+# This file holds the knock sequence, which is the only secret involved.
+# Keep it readable by root alone:
+#
+#     sudo chown root:root /etc/knockd.conf
+#     sudo chmod 600 /etc/knockd.conf
+#
+# knockd warns at startup if anyone else can read it.
+#
+# Values that are missing, unparseable or out of range fall back to the
+# built-in default, with a warning in the log saying which and why.
+# Restart the daemon to pick up a change: systemctl restart knockd
 
-# ── Knock Sequence ──
-# Comma-separated list of ports that must be knocked in order.
+# ── Knock sequence ──
+# Ports that must be knocked in order, 2 to 16 of them, each 1–65535.
+# CHANGE THESE. The values below are the ones published in the README, so
+# leaving them is the same as having no sequence at all.
+#
+# Ports in the 1024–65535 range that nothing else on the host uses are the
+# usual choice. The sequence must not include the protected port.
 sequence = 7000, 8000, 9000
 
-# ── Protected Port ──
-# The TCP port to open when a successful knock is received.
+# ── Protected port ──
+# The TCP port opened for a client that completes the sequence.
 port = 22
 
 # ── Timing ──
-# How long (in seconds) the port stays open before auto-closing.
+# How long the port stays open after a successful knock, in seconds. Long
+# enough to start a connection, not long enough to matter if someone else
+# shares your address: SSH keeps an established connection alive after the
+# rule is removed, so this does not limit session length.
 timeout = 30
 
-# Max seconds allowed between knocks before the sequence resets.
+# Longest gap allowed between two knocks, in seconds. A client that pauses
+# for longer starts the sequence again.
 window = 15
 
 # ── Capacity ──
-# Max number of concurrent clients to track.
+# How many addresses can be partway through the sequence at once, and how
+# many grants can be open at once. Both tables are allocated at startup.
 max_clients = 64
 
+# ── Capture interface ──
+# Leave unset to watch every interface. Set it to a single interface name
+# to ignore knocks arriving anywhere else, which is worth doing on a host
+# with more than one network.
+# interface = eth0
+
 # ── Logging ──
-# 0 = ERROR, 1 = WARN, 2 = INFO, 3 = DEBUG
+# 0 = errors only, 1 = warnings, 2 = normal, 3 = debug.
+#
+# Level 3 logs the knock ports themselves. Under systemd the log goes to
+# the journal, which is readable by more people than this file is, so treat
+# level 3 as a debugging setting rather than a permanent one.
 log_level = 2

@@ -1,8 +1,12 @@
 /*
- * logger.h — Logging interface for the port knocking daemon.
+ * logger.h — Leveled logging.
  *
- * Provides leveled logging (DEBUG, INFO, WARN, ERROR) that outputs
- * to stderr in foreground mode and to syslog in daemon mode.
+ * Writes to stderr by default, or to syslog when logger_init() is told to.
+ * Under systemd, stderr already ends up in the journal, so stderr is the
+ * normal choice and syslog is there for running the daemon some other way.
+ *
+ * log_msg() is safe to call from any thread: each call emits one complete
+ * line.
  */
 
 #ifndef LOGGER_H
@@ -17,18 +21,18 @@ typedef enum {
 
 /*
  * Initialize the logger.
- *   use_syslog: if true, log to syslog; if false, log to stderr.
+ *   use_syslog: non-zero to log to syslog, zero to log to stderr.
  */
 void logger_init(int use_syslog);
 
 /*
- * Shutdown the logger (closes syslog if open).
+ * Shut the logger down (closes syslog if it was opened).
  */
 void logger_close(void);
 
 /*
- * Log a message at the given level. Uses printf-style formatting.
- * Messages below the configured LOG_LEVEL are silently dropped.
+ * Log one printf-style message. Messages above the configured LOG_LEVEL
+ * are dropped. The message body is truncated past ~890 characters.
  */
 void log_msg(log_level_t level, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
