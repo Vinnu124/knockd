@@ -1,178 +1,341 @@
-# knockd 
+# knockd
 
-A lightweight security daemon written in C that hides services behind a secret sequence of connection attempts. In its default state, SSH (port 22) is completely firewalled. Only a client that "knocks" on the right ports in the right order gets temporary access, automatically revoked after 30 seconds.
+A port knocking daemon for Linux, in C.
 
-No open ports. No listening sockets. No trace. Just a raw packet sniffer watching in silence.
+The protected port stays closed in your firewall. When a client sends
+packets to a configured sequence of ports in the right order, knockd adds
+an `iptables` ACCEPT rule for that one source address and removes it again
+after a timeout. Both TCP SYN and UDP knocks work.
+
+The daemon reads packets from an `AF_PACKET` socket rather than binding
+anything, so it adds no listening socket of its own and a port scan of the
+host will not find it.
 
 ---
 
-## How It Works
+## What this does and does not protect against
+
+Port knocking hides a service behind a shared secret that is sent in
+cleartext. That is worth something, and it is worth being precise about
+what:
+
+**It helps with**
+
+- Automated scanning and credential stuffing. A closed port gets no
+  attention from the botnets that work through the internet's SSH servers
+  all day, which also keeps your auth log readable.
+- Reducing exposure to an unpatched service. If a zero-day in sshd is
+  announced at 3am, the port being closed buys you time.
+
+**It does not help with**
+
+- **Anyone who can observe your traffic.** The sequence is a static secret
+  in the clear. An on-path observer, a compromised router, a shared Wi-Fi
+  network, or your ISP can read it off the wire and replay it afterwards.
+  There is no nonce, no timestamp and no HMAC, so a recorded sequence works
+  forever. If you need that, use
+  [fwknop](https://github.com/mrash/fwknop), which does single packet
+  authorization properly.
+- **Shared addresses.** The grant is per source IP. While it is open,
+  anything behind the same NAT or VPN exit as you can reach the port too.
+- **Someone who already has your credentials.** This is a layer in front of
+  authentication, not a substitute for it. Keep key-only SSH, keep
+  `PermitRootLogin no`, keep fail2ban.
+
+knockd also only handles IPv4. If the host accepts IPv6, the protected port
+is reachable over IPv6 regardless of what knockd is doing, so block it
+there too (`ip6tables`) or the whole exercise is decorative.
+
+---
+
+## How it works
 
 ```
-Client knocks:   TCP SYN or UDP → 7000 → 8000 → 9000
-                                  ↓
-Daemon detects:  Raw socket sniffs packets, tracks sequence per IP
-                                  ↓
-Firewall opens:  iptables -I INPUT -s <YOUR_IP> -p tcp --dport 22 -j ACCEPT
-                                  ↓
-30 seconds pass: Rule is automatically removed
+client                                    server
+  |                                         |
+  |-- SYN -> 7000 --------------------------> capture thread
+  |-- SYN -> 8000 -------------------------->   parses the packet, queues it
+  |-- SYN -> 9000 -------------------------->
+  |                                              |
+  |                                         processor thread
+  |                                           tracks progress per source IP
+  |                                           on the last knock:
+  |                                             iptables -I KNOCKD
+  |                                               -s <client> --dport 22 -j ACCEPT
+  |                                              |
+  |-- SSH ----------------------------------->  allowed
+  |                                              |
+  |                                         30 seconds later
+  |                                           the rule is removed
 ```
 
-The sniffer uses `AF_PACKET` raw sockets, capturing packets at the network level without binding to any port. This makes the daemon completely invisible to port scanners. Both TCP SYN and UDP knocks are supported.
+Two threads, because opening the firewall means `fork()` and `exec()` of
+`iptables`, which takes milliseconds. Doing that on the capture path would
+let the socket's receive buffer overflow and lose other clients' knocks
+while it ran. So the capture thread only parses and enqueues, and a
+processor thread does everything slow.
+
+Grant expiry is driven from the processor loop rather than from a timer
+thread per grant, which keeps a knock flood from spawning unbounded
+threads.
+
+### knockd's rules live in their own chain
+
+At startup knockd creates an iptables chain called `KNOCKD` and inserts
+`INPUT -j KNOCKD` at the top. Every rule it adds goes in that chain.
+
+This matters because iptables deletes rules by matching their
+specification, not by identity. If knockd put its rules straight into
+`INPUT`, expiring a grant for `10.0.0.5` would delete whichever matching
+rule came first, which could be a permanent one you added by hand.
+
+On shutdown knockd flushes and removes its own chain and nothing else.
+**Stopping the daemon closes the protected port, it does not open it** —
+your own DROP rule is untouched.
 
 ---
 
 ## Requirements
 
-Fedora (or any Linux with raw socket support):
+Linux, and root. The capture socket needs `CAP_NET_RAW` and iptables needs
+`CAP_NET_ADMIN`.
 
 ```bash
-sudo dnf groupinstall "Development Tools"
-sudo dnf install gcc make nmap iptables-nft
+# Fedora / RHEL
+sudo dnf install gcc make iptables-nft nmap-ncat
+
+# Debian / Ubuntu
+sudo apt install build-essential iptables netcat-openbsd
 ```
 
-> The daemon must run as **root** because raw sockets (`AF_PACKET`) and `iptables` both require elevated privileges.
+`nmap` is not needed. `nc` is only needed on the machine you knock *from*.
 
 ---
 
-## Installation and Configuration
+## Build and install
 
-1. Build and install the daemon:
 ```bash
 make
 sudo make install
 ```
 
-2. Edit your configuration file at `/etc/knockd.conf`:
-```ini
-# Secret sequence of ports (default: 7000, 8000, 9000)
-sequence = 7000, 8000, 9000
-# Port to unlock after a successful knock (default: 22)
-port = 22
-# Seconds before access is automatically revoked (default: 30)
-timeout = 30
-# Max seconds allowed between consecutive knocks (default: 15)
-window = 15
-# Max concurrent client slots in memory (default: 64)
-max_clients = 64
-# Log verbosity: 0=ERROR, 1=WARN, 2=INFO, 3=DEBUG (default: 2)
-log_level = 2
-```
-*Note: Any invalid or out-of-range config values are automatically reset to safe defaults with warning logs.*
+That installs `/usr/local/bin/knockd`, the systemd unit, and
+`/etc/knockd.conf` with mode 600. An existing `/etc/knockd.conf` is never
+overwritten, so reinstalling will not lose your sequence.
 
-3. Enable and start the systemd service:
-```bash
-sudo systemctl enable knockd
-sudo systemctl start knockd
+`make install` honours `DESTDIR` and `PREFIX`.
+
+### Configure
+
+Edit `/etc/knockd.conf`:
+
+```ini
+sequence    = 7000, 8000, 9000   # 2-16 ports, in the order to knock them
+port        = 22                 # the port to open
+timeout     = 30                 # seconds the port stays open
+window      = 15                 # max seconds between consecutive knocks
+max_clients = 64                 # concurrent sequences and grants tracked
+# interface = eth0               # unset watches every interface
+log_level   = 2                  # 0 errors, 1 warnings, 2 normal, 3 debug
 ```
-Or run directly with a custom config file (useful for local testing without installing):
+
+**Change the sequence before you start.** The default is published in this
+file, in the example config and in the paragraph above, so leaving it is
+equivalent to running no sequence at all.
+
+A value that is missing, unparseable or out of range falls back to its
+built-in default and says so in the log. The sequence is stricter: one bad
+port rejects the whole list, because listening on a half-parsed version of
+a secret is worse than refusing it.
+
+The config file is the only secret here, so keep it to root:
+
 ```bash
-sudo ./knockd -c ./knockd.conf.example
-sudo ./knockd -c ./knockd.conf.example -v   # verbose logging
+sudo chmod 600 /etc/knockd.conf
 ```
+
+knockd warns at startup if anyone else can read it. It also withholds the
+sequence from its own startup banner unless you pass `-v`, because under
+systemd the log goes to the journal, which more users can read than can
+read `/etc/knockd.conf`.
 
 ---
 
-## Running and Knocking
+## Set up the firewall
 
-### 1. Set up the firewall
+knockd adds the ACCEPT rules. Blocking the port in the first place is your
+job, and knockd never touches that rule.
 
-> If you are already connected via SSH, run the first line **before** blocking port 22 or you will disconnect yourself.
+> Add the first rule **before** the second, or you will disconnect your own
+> SSH session.
 
 ```bash
-# Keep existing connections alive
-sudo iptables -I INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+# Keep connections that are already established
+sudo iptables -I INPUT 1 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# Block SSH by default
+# Block new connections to the protected port
 sudo iptables -A INPUT -p tcp --dport 22 -j DROP
 ```
 
-### 2. Send the knock sequence
-
-Use the included client script from your machine:
+Neither rule survives a reboot on its own. Persist them:
 
 ```bash
-# Send the knock sequence
-./knock_client.sh <server-ip>
+# Debian / Ubuntu
+sudo apt install iptables-persistent && sudo netfilter-persistent save
 
-# Custom sequence ports and knock delay
-./knock_client.sh <server-ip> -p 7000,8000,9000 -d 0.5
-
-# Knock and automatically SSH in afterwards
-./knock_client.sh <server-ip> --ssh
-
-# Knock as a specific SSH user
-./knock_client.sh <server-ip> --ssh vinayak
-
-# Use UDP knocks instead of TCP
-./knock_client.sh <server-ip> --udp
+# Fedora / RHEL
+sudo dnf install iptables-services && sudo service iptables save
 ```
 
-The script will tell you exactly what happened and print the SSH command to run.
+**If firewalld is running** (the default on Fedora) it owns the ruleset,
+and a `firewall-cmd --reload` will discard both these rules and knockd's
+chain. Either manage the DROP through firewalld, or disable firewalld and
+manage iptables directly. Restart knockd after anything that reloads the
+firewall, since it only installs its chain at startup.
 
-You can also knock manually. Use `nc` (netcat) for TCP, not `nmap` (see below for why):
-
-```bash
-nc -z -w 1 <server-ip> 7000; sleep 0.5
-nc -z -w 1 <server-ip> 8000; sleep 0.5
-nc -z -w 1 <server-ip> 9000
-```
-
-### 3. SSH in
-
-```bash
-ssh user@<server-ip>
-# You have 30 seconds before the port closes automatically
-```
-
-### 4. View logs
-
-Since `knockd` runs as a systemd service, its logs are stored in the journal:
-```bash
-# Watch live
-sudo journalctl -u knockd -f
-
-# See recent entries
-sudo journalctl -u knockd -n 50
-```
+Leave the knock ports themselves closed, not DROPped. See
+[Why nc, not nmap](#why-nc-not-nmap).
 
 ---
 
-## Why nc, not nmap?
+## Run
 
-Both `nc` (netcat) and `nmap` can send TCP packets, but they behave very differently:
+Under systemd, which is what the unit file is for:
 
-Because `nmap` never completes the TCP handshake, the OS kernel independently retransmits the unanswered SYN after ~1-3 seconds. That retransmit arrives at knockd as a second knock on the same port, which is out of sequence and resets your progress.
+```bash
+sudo systemctl enable --now knockd
+sudo systemctl status knockd
+```
 
-`nc` gets a RST back (port closed), the kernel is satisfied, and no retransmit happens.
+Or directly, which is useful for testing against a local config:
 
-You can still keep `nmap` installed. The client script uses it as a fallback for UDP knocking (which requires raw sockets that `nc` cannot send). For TCP, `nc` is always preferred.
+```bash
+sudo ./knockd -c ./knockd.conf.example -v
+```
+
+```
+  -c, --config <file>  Config file (default: /etc/knockd.conf)
+  -v, --verbose        Debug logging; overrides log_level
+  -s, --syslog         Log to syslog instead of stderr
+  -V, --version        Print the version and exit
+  -h, --help           Print this help and exit
+```
+
+knockd runs in the foreground and expects to be supervised. A config file
+named with `-c` must exist: knockd refuses to start rather than silently
+fall back to the default sequence.
 
 ---
 
-## Verbose Output (what to expect)
+## Knock
+
+With the included client, from the machine you want to connect from:
+
+```bash
+./knock_client.sh <server>                          # knock
+./knock_client.sh <server> --ssh                    # knock, then ssh
+./knock_client.sh <server> --ssh admin              # ssh as a given user
+./knock_client.sh <server> -p 1111,2222,3333        # a different sequence
+./knock_client.sh <server> -p ... -P 2222 --ssh     # sshd on another port
+./knock_client.sh <server> --udp                    # UDP instead of TCP SYN
+./knock_client.sh <server> -d 0.3                   # delay between knocks
+```
+
+The port list has to match the server's. A wrong port does not merely fail,
+it discards whatever progress the sequence had made.
+
+By hand, with `nc`:
+
+```bash
+for p in 7000 8000 9000; do nc -w 1 <server> "$p" </dev/null; sleep 0.5; done
+ssh user@<server>
+```
+
+### Logs
+
+```bash
+sudo journalctl -u knockd -f        # follow
+sudo journalctl -u knockd -n 50     # recent
+```
+
+At the default log level knockd records progress as "is at step 2 of 3"
+without naming the port, so the journal does not leak the sequence. Level 3
+(or `-v`) logs the ports, which is why it is a debugging setting rather
+than a permanent one.
+
+---
+
+## Why nc, not nmap
+
+Both can send a TCP SYN, but they leave the connection in different states,
+and that changes what the server sees.
+
+`nmap` does not complete the handshake. The kernel on the *client* side
+treats its own SYN as unanswered and retransmits it after one to three
+seconds. That retransmit reaches the server as a second knock on the same
+port — out of sequence, and in a naive implementation enough to reset your
+progress. `nc` completes a `connect()`, gets an RST back from the closed
+port, and the kernel has nothing left to retransmit.
+
+knockd ignores a repeat of the port it just accepted for five seconds, so a
+retransmit does not break a sequence either way. `nc` is still the better
+tool, and it is the only one of the two that can send a UDP knock without
+root.
+
+This is also why the knock ports should be **closed, not DROPped**. A
+closed port answers with an RST and the client's kernel stops. A DROPped
+port answers with nothing, so the client's kernel retransmits exactly as it
+does for `nmap`. Leave the knock ports out of your DROP rules.
+
+---
+
+## Development
+
+```bash
+make              # build
+make strict       # full warning set, warnings as errors (what CI runs)
+make debug        # -O0, symbols, AddressSanitizer and UBSan
+make test         # unit tests for the state machine and the config parser
+sudo tests/integration.sh   # end-to-end against the real firewall
+```
+
+The integration test starts the daemon, knocks at it over loopback, and
+checks the resulting iptables state at each step: that an out-of-order
+sequence is rejected, that the right one opens the port, that access
+expires on its own, and that shutdown removes knockd's chain while leaving
+the operator's DROP rule in place. It only ever uses port 2222 and cleans
+up after itself, including on failure.
+
+### Layout
+
+| File | |
+|---|---|
+| [src/main.c](src/main.c) | argument handling, threads, the processor loop |
+| [src/sniffer.c](src/sniffer.c) | raw socket, link/IP/TCP/UDP parsing |
+| [src/knocker.c](src/knocker.c) | per-IP sequence state machine |
+| [src/firewall.c](src/firewall.c) | the `KNOCKD` chain and grant expiry |
+| [src/packet_queue.c](src/packet_queue.c) | bounded queue between the threads |
+| [src/config.c](src/config.c) | config parsing and validation |
+| [src/logger.c](src/logger.c) | leveled logging to stderr or syslog |
+
+---
+
+## Verbose output
 
 ![knockd output](assets/image.png)
 
 ---
 
-## Security Notes
-
-- **No shell injection** -- `iptables` is invoked via `fork()`/`execv()`, never `system()`
-- **IP validation** -- all IPs pass through `inet_ntop()` before being used in any command
-- **Per-IP rules** -- only the knocking IP is granted access, not the whole network
-- **Auto-cleanup** -- `systemctl stop knockd` triggers graceful removal of all added rules
-- **Invisible** -- no ports are bound; the daemon cannot be found by a port scan
-
----
-
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| `Failed to create raw socket` | Confirm you are root and on Linux (not macOS) |
-| Knocks detected but sequence keeps resetting | Use `nc` instead of `nmap` for TCP knocking (see above) |
-| Knocks not detected at all | Run `sudo tcpdump -i any port 7000` to verify packets arrive at the machine |
-| `iptables` errors | Run `sudo dnf install iptables-nft` and check `iptables -L` |
-| Port still blocked after knock | Check `sudo iptables -L INPUT -n` -- the ACCEPT rule should appear at the top |
-| SSH refused right after knocking | You are SSHing to the right IP, correct? It should be the server's IP, not your own |
+| Symptom | What to check |
+|---|---|
+| `Failed to create raw socket` | You are not root, or not on Linux. |
+| `Could not create or flush the KNOCKD chain` | `iptables -L` works as root; on Fedora, `dnf install iptables-nft`. |
+| Knocks are not detected at all | `sudo tcpdump -i any port 7000` on the server, to see whether the packets arrive. If they do not, something upstream is dropping them. |
+| Knocks are detected but the sequence keeps resetting | Use `nc`, not `nmap`, and make sure the knock ports are not in a DROP rule. |
+| The sequence completes but the port is still blocked | `sudo iptables -S KNOCKD` should list an ACCEPT for your address. If it does, your DROP rule is probably above the `INPUT -j KNOCKD` jump: check `sudo iptables -S INPUT`. |
+| It worked, then stopped after a firewall change | A firewalld or iptables reload discards knockd's chain. `systemctl restart knockd`. |
+| `iptables` commands in the log fail under systemd | The unit file applies `SystemCallFilter`, `MemoryDenyWriteExecute` and `ProtectSystem`. If iptables misbehaves under it, comment those out one at a time to find which. |
+| Access expires at slightly the wrong time | Expiry is checked a few times a second and timestamps have one-second granularity, so a rule's real lifetime lands within about a second of `timeout`. An SSH connection that is already established survives the rule being removed. |
+| Everything works but anyone can still reach the port | Check IPv6: `sudo ip6tables -S`. knockd is IPv4 only. |
