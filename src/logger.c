@@ -15,7 +15,6 @@
 #include <syslog.h>
 #include <time.h>
 
-/* Longest message body we keep; anything longer is truncated. */
 #define LOG_MSG_MAX  896
 #define LOG_LINE_MAX 1024
 
